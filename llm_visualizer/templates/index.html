@@ -1,0 +1,207 @@
+{% extends "base.html" %}
+{% block content %}
+
+<!-- ─── Control Panel ─────────────────────────────────────── -->
+<div class="control-panel">
+    <div class="control-group">
+        <label for="model-select">Model:</label>
+        <select id="model-select">
+            {% for key, desc in models.items() %}
+            <option value="{{ key }}">{{ desc }}</option>
+            {% endfor %}
+        </select>
+        <span id="model-info" class="info-badge"></span>
+    </div>
+
+    <div class="control-group">
+        <label for="text-input">Input Text:</label>
+        <input type="text" id="text-input" placeholder="Enter a word or sentence..." value="The cat sat on the mat">
+        <button id="btn-analyze" class="btn-primary">🔍 Analyze</button>
+    </div>
+
+    <div id="token-display" class="token-display"></div>
+</div>
+
+<!-- ─── Tab Navigation ────────────────────────────────────── -->
+<div class="tab-nav">
+    <button class="tab-btn active" data-tab="tab-embeddings">Embeddings</button>
+    <button class="tab-btn" data-tab="tab-layers">Layer Trace</button>
+    <button class="tab-btn" data-tab="tab-attention">Attention</button>
+    <button class="tab-btn" data-tab="tab-slicer">Dim Slicer</button>
+    <button class="tab-btn" data-tab="tab-clusters">Clusters</button>
+    <button class="tab-btn" data-tab="tab-trajectory">Token Trajectory</button>
+    <button class="tab-btn" data-tab="tab-patterns">Pattern Finder</button>
+</div>
+
+<!-- ─── Tab: Embeddings ───────────────────────────────────── -->
+<div id="tab-embeddings" class="tab-content active">
+    <h2>Token & Position Embeddings</h2>
+    <div class="controls-row">
+        <label>Projection: </label>
+        <select id="emb-projection">
+            <option value="pca">PCA</option>
+            <option value="tsne">t-SNE</option>
+            <option value="umap">UMAP</option>
+        </select>
+        <label>Show: </label>
+        <select id="emb-type">
+            <option value="combined">Combined (token + position)</option>
+            <option value="token">Token embeddings only</option>
+            <option value="position">Position embeddings only</option>
+        </select>
+        <button id="btn-show-emb" class="btn-secondary">Show</button>
+    </div>
+    <div class="viz-container">
+        <div id="emb-plot-3d" class="plot-3d"></div>
+        <div id="emb-info" class="info-panel"></div>
+    </div>
+</div>
+
+<!-- ─── Tab: Layer Trace ──────────────────────────────────── -->
+<div id="tab-layers" class="tab-content">
+    <h2>Layer-by-Layer Trace</h2>
+    <div class="controls-row">
+        <label>Layer: </label>
+        <input type="range" id="layer-slider" min="0" max="12" value="0">
+        <span id="layer-label">Layer 0 (input)</span>
+        <label>Projection: </label>
+        <select id="layer-projection">
+            <option value="pca">PCA</option>
+            <option value="tsne">t-SNE</option>
+            <option value="umap">UMAP</option>
+        </select>
+        <button id="btn-animate-layers" class="btn-secondary">▶ Animate</button>
+    </div>
+    <div class="viz-container">
+        <div id="layer-plot-3d" class="plot-3d"></div>
+        <div id="layer-delta-chart" class="plot-small"></div>
+    </div>
+    <div id="layer-hover-info" class="hover-info-panel"></div>
+</div>
+
+<!-- ─── Tab: Attention ────────────────────────────────────── -->
+<div id="tab-attention" class="tab-content">
+    <h2>Attention Visualization</h2>
+    <div class="controls-row">
+        <label>Layer: </label>
+        <select id="attn-layer-select"></select>
+        <label>Head: </label>
+        <select id="attn-head-select">
+            <option value="avg">Average</option>
+        </select>
+        <label>View: </label>
+        <select id="attn-view">
+            <option value="heatmap">Heatmap</option>
+            <option value="rollout">Attention Rollout</option>
+        </select>
+        <button id="btn-show-attn" class="btn-secondary">Show</button>
+    </div>
+    <div class="viz-container">
+        <div id="attn-heatmap" class="plot-attn"></div>
+        <div id="attn-head-stats" class="info-panel"></div>
+    </div>
+</div>
+
+<!-- ─── Tab: Dimension Slicer ─────────────────────────────── -->
+<div id="tab-slicer" class="tab-content">
+    <h2>Dimension Slicer</h2>
+    <div class="controls-row">
+        <label>Layer: </label>
+        <select id="slicer-layer-select"></select>
+        <label>Dimensions: </label>
+        <input type="text" id="slicer-dim-spec" placeholder="e.g. 0:100:2 or 5,10,15" value="0:50">
+        <label>Projection: </label>
+        <select id="slicer-projection">
+            <option value="pca">PCA</option>
+            <option value="tsne">t-SNE</option>
+            <option value="umap">UMAP</option>
+        </select>
+        <button id="btn-slice" class="btn-secondary">Slice & View</button>
+    </div>
+    <p class="hint">
+        Syntax: <code>2,45,6</code> | <code>0:100</code> | <code>0:100:2</code> (every 2nd) |
+        <code>even</code> | <code>odd</code> | <code>first_half</code> | <code>second_half</code>
+    </p>
+    <div class="viz-container">
+        <div id="slicer-plot-3d" class="plot-3d"></div>
+        <div id="slicer-plot-2d" class="plot-2d"></div>
+    </div>
+    <div id="slicer-stats" class="stats-panel"></div>
+    <div id="slicer-variance" class="plot-small"></div>
+</div>
+
+<!-- ─── Tab: Clusters ─────────────────────────────────────── -->
+<div id="tab-clusters" class="tab-content">
+    <h2>Embedding Clusters</h2>
+    <div class="controls-row">
+        <label>Mode: </label>
+        <select id="cluster-mode">
+            <option value="vocab">Vocabulary Embeddings</option>
+            <option value="layer">Layer Hidden States</option>
+        </select>
+        <label>Clusters: </label>
+        <input type="number" id="cluster-n" value="8" min="2" max="50">
+        <label>Sample Size: </label>
+        <input type="number" id="cluster-sample" value="3000" min="100" max="20000">
+        <button id="btn-cluster" class="btn-secondary">Cluster</button>
+    </div>
+    <div class="viz-container">
+        <div id="cluster-plot-3d" class="plot-3d"></div>
+        <div id="cluster-info" class="info-panel"></div>
+    </div>
+</div>
+
+<!-- ─── Tab: Token Trajectory ─────────────────────────────── -->
+<div id="tab-trajectory" class="tab-content">
+    <h2>Token Trajectory Through Layers</h2>
+    <div class="controls-row">
+        <label>Token: </label>
+        <select id="traj-token-select"></select>
+        <label>Projection: </label>
+        <select id="traj-projection">
+            <option value="pca">PCA</option>
+            <option value="tsne">t-SNE</option>
+            <option value="umap">UMAP</option>
+        </select>
+        <button id="btn-trajectory" class="btn-secondary">Trace</button>
+    </div>
+    <div class="viz-container">
+        <div id="traj-plot-3d" class="plot-3d"></div>
+        <div id="traj-info" class="info-panel"></div>
+    </div>
+</div>
+
+<!-- ─── Tab: Pattern Finder ───────────────────────────────── -->
+<div id="tab-patterns" class="tab-content">
+    <h2>Automatic Pattern Finder</h2>
+    <div class="controls-row">
+        <label>Pattern: </label>
+        <select id="pattern-select">
+            <option value="spiral">Spiral</option>
+            <option value="circle">Circle</option>
+            <option value="line">Line</option>
+            <option value="helix">Helix</option>
+            <option value="sphere">Sphere Surface</option>
+            <option value="grid">Grid</option>
+            <option value="clusters">Cluster Pattern</option>
+        </select>
+        <button id="btn-scan-pattern" class="btn-secondary">🔎 Scan All Layers</button>
+        <button id="btn-scan-all-patterns" class="btn-secondary">🔎 Scan All Patterns (current layer)</button>
+    </div>
+    <div class="viz-container">
+        <div id="pattern-preview" class="plot-3d"></div>
+        <div id="pattern-results" class="plot-3d"></div>
+    </div>
+    <div id="pattern-ranking" class="info-panel"></div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/main.js') }}"></script>
+<script src="{{ url_for('static', filename='js/embedding_viz.js') }}"></script>
+<script src="{{ url_for('static', filename='js/attention_viz.js') }}"></script>
+<script src="{{ url_for('static', filename='js/slicer_viz.js') }}"></script>
+<script src="{{ url_for('static', filename='js/pattern_viz.js') }}"></script>
+{% endblock %}
+
