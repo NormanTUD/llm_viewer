@@ -12,6 +12,468 @@ app = Flask(__name__)
 wrapper = None
 sae_models = {}  # layer_idx → trained SAE
 
+# ── Add to the top of app.py, after existing imports ────────
+from sklearn.manifold import TSNE
+
+# Optional UMAP — graceful fallback
+try:
+    from umap import UMAP
+    HAS_UMAP = True
+except ImportError:
+    HAS_UMAP = False
+
+
+def reduce_dims(data_tensor, n_components=3, method='pca', **kwargs):
+    """
+    Unified dimensionality reduction.
+    method: 'pca' | 'tsne' | 'umap'
+    Returns (projected_np, meta_dict)
+    """
+    data = data_tensor.float()
+    N = data.shape[0]
+
+    if method == 'pca':
+        proj, expl = pca_reduce(data, n_components)
+        return proj, {'explained_variance': expl.tolist()}
+
+    elif method == 'tsne':
+        perplexity = kwargs.get('perplexity', min(30, max(5, N - 1)))
+        tsne = TSNE(n_components=min(n_components, 3),
+                     perplexity=perplexity,
+                     learning_rate='auto',
+                     init='pca',
+                     random_state=42)
+        proj = tsne.fit_transform(data.numpy())
+        return proj, {'kl_divergence': float(tsne.kl_divergence_),
+                      'perplexity': perplexity}
+
+    elif method == 'umap':
+        if not HAS_UMAP:
+            # Fall back to t-SNE if umap not installed
+            return reduce_dims(data_tensor, n_components, 'tsne', **kwargs)
+        n_neighbors = kwargs.get('n_neighbors', min(15, max(2, N - 1)))
+        min_dist = kwargs.get('min_dist', 0.1)
+        reducer = UMAP(n_components=n_components,
+                       n_neighbors=n_neighbors,
+                       min_dist=min_dist,
+                       random_state=42)
+        proj = reducer.fit_transform(data.numpy())
+        return proj, {'n_neighbors': n_neighbors, 'min_dist': min_dist}
+
+    else:
+        raise ValueError(f"Unknown method: {method}")
+
+# ── Add to app.py ───────────────────────────────────────────
+from scipy.cluster.hierarchy import linkage, fcluster, dendrogram as scipy_dendro
+from sklearn.cluster import DBSCAN
+from sklearn.metrics import silhouette_score
+
+
+@app.route('/api/vis3d/subclusters', methods=['POST'])
+def vis3d_subclusters():
+    """
+    Hierarchical subclustering of prompts at a given layer.
+    Returns cluster assignments, dendrogram data, and 3D scatter.
+    """
+    try:
+        w = get_wrapper()
+        data = request.json
+        prompts = data.get('prompts', [])
+        layer_idx = data.get('layer_idx', 6)
+        method = data.get('reduction', 'pca')       # pca | tsne | umap
+        n_clusters = data.get('n_clusters', None)    # None = auto via DBSCAN
+        linkage_method = data.get('linkage', 'ward') # ward | average | complete
+
+        if len(prompts) < 4:
+            return jsonify({'status': 'error',
+                            'message': 'Need ≥ 4 prompts for subclustering'}), 400
+
+        # Gather activations
+        acts, labels = [], []
+        for p in prompts:
+            a = w.get_activations(p, layer=layer_idx)
+            if a is not None:
+                acts.append(a)
+                labels.append(p[:50])
+        if len(acts) < 4:
+            return jsonify({'status': 'error',
+                            'message': 'Too few valid activations'}), 400
+
+        mat = torch.stack(acts)           # [N, d_model]
+        mat_np = mat.numpy()
+
+        # ── Hierarchical linkage ──
+        Z = linkage(mat_np, method=linkage_method, metric='cosine')
+
+        # ── Cluster assignment ──
+        if n_clusters is not None:
+            cluster_ids = fcluster(Z, t=n_clusters, criterion='maxclust')
+        else:
+            # Auto-detect with DBSCAN on the cosine distance matrix
+            from sklearn.metrics.pairwise import cosine_distances
+            dist_mat = cosine_distances(mat_np)
+            eps = float(np.median(dist_mat[dist_mat > 0]) * 0.6)
+            db = DBSCAN(eps=eps, min_samples=2, metric='precomputed')
+            cluster_ids = db.fit_predict(dist_mat)
+            # Relabel noise (-1) as its own cluster
+            if -1 in cluster_ids:
+                cluster_ids[cluster_ids == -1] = cluster_ids.max() + 1
+            cluster_ids = cluster_ids + 1   # 1-based
+
+        n_found = len(set(cluster_ids))
+
+        # ── Silhouette score (if ≥ 2 clusters) ──
+        sil = -1.0
+        if n_found >= 2 and n_found < len(acts):
+            sil = float(silhouette_score(mat_np, cluster_ids, metric='cosine'))
+
+        # ── Dimensionality reduction for scatter ──
+        projected, red_meta = reduce_dims(mat, n_components=3, method=method)
+
+        # ── Dendrogram structure (serialisable) ──
+        dendro = scipy_dendro(Z, no_plot=True, labels=labels)
+        dendro_data = {
+            'icoord': [list(map(float, x)) for x in dendro['icoord']],
+            'dcoord': [list(map(float, x)) for x in dendro['dcoord']],
+            'ivl':    dendro['ivl'],
+            'color_list': dendro.get('color_list', []),
+        }
+
+        # ── Per-cluster centroid in 3D ──
+        centroids_3d = []
+        for cid in sorted(set(cluster_ids)):
+            mask = cluster_ids == cid
+            centroid = projected[mask].mean(axis=0)
+            centroids_3d.append({
+                'cluster': int(cid),
+                'x': float(centroid[0]),
+                'y': float(centroid[1]),
+                'z': float(centroid[2]),
+                'size': int(mask.sum()),
+            })
+
+        points = []
+        for i in range(len(labels)):
+            points.append({
+                'x': float(projected[i, 0]),
+                'y': float(projected[i, 1]),
+                'z': float(projected[i, 2]),
+                'label': labels[i],
+                'cluster': int(cluster_ids[i]),
+            })
+
+        return jsonify({
+            'status': 'ok',
+            'points': points,
+            'centroids': centroids_3d,
+            'n_clusters': n_found,
+            'silhouette': sil,
+            'dendrogram': dendro_data,
+            'reduction_meta': red_meta,
+            'method': method,
+        })
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+# ── Add to app.py ───────────────────────────────────────────
+
+@app.route('/api/vis3d/spiral_analysis', methods=['POST'])
+def vis3d_spiral_analysis():
+    """
+    Detect and visualise spiral structure in SAE feature space.
+    Projects to 2D, converts to polar coordinates, fits Archimedean
+    spiral arms, and returns both Cartesian and polar views.
+    """
+    try:
+        w = get_wrapper()
+        data = request.json
+        text = data.get('text', '')
+        layer_idx = data.get('layer_idx', 6)
+        method = data.get('reduction', 'pca')
+        n_arms = data.get('n_arms', 3)              # max spiral arms to detect
+
+        if layer_idx not in sae_models:
+            return jsonify({'status': 'error',
+                            'message': f'No SAE for layer {layer_idx}'}), 400
+        sae = sae_models[layer_idx]
+
+        # Decoder directions
+        W = sae.decoder.weight.detach().T            # [n_features, d_model]
+        n_feat = W.shape[0]
+
+        # Activation strengths
+        act = w.get_activations(text, layer=layer_idx) if text else None
+        if act is not None:
+            with torch.no_grad():
+                fa = torch.relu(sae.encoder(act.unsqueeze(0))).squeeze(0)
+            strengths = fa.numpy()
+        else:
+            strengths = np.zeros(n_feat)
+
+        # Subsample if huge
+        max_pts = 1500
+        if n_feat > max_pts:
+            top_k = min(300, n_feat)
+            top_idx = np.argsort(-strengths)[:top_k]
+            rest = np.setdiff1d(np.arange(n_feat), top_idx)
+            sample_idx = np.random.choice(rest, max_pts - top_k, replace=False)
+            sel = np.concatenate([top_idx, sample_idx])
+        else:
+            sel = np.arange(n_feat)
+
+        W_sel = W[sel]
+        str_sel = strengths[sel]
+
+        # ── 2D projection for polar analysis ──
+        proj2d, meta2d = reduce_dims(W_sel, n_components=2, method=method)
+
+        # ── 3D projection for scatter ──
+        proj3d, meta3d = reduce_dims(W_sel, n_components=3, method=method)
+
+        # ── Convert to polar coordinates ──
+        cx, cy = proj2d.mean(axis=0)                 # centroid
+        dx = proj2d[:, 0] - cx
+        dy = proj2d[:, 1] - cy
+        r = np.sqrt(dx**2 + dy**2)
+        theta = np.arctan2(dy, dx)                   # [-π, π]
+
+        # ── Spiral arm detection ──
+        # Sort by angle, fit piecewise linear r(θ) to find arms
+        order = np.argsort(theta)
+        theta_sorted = theta[order]
+        r_sorted = r[order]
+
+        # Bin into angular slices and find radial peaks
+        n_bins = 60
+        bin_edges = np.linspace(-np.pi, np.pi, n_bins + 1)
+        bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+        bin_r_mean = np.zeros(n_bins)
+        bin_r_std = np.zeros(n_bins)
+        bin_count = np.zeros(n_bins)
+        for bi in range(n_bins):
+            mask = (theta >= bin_edges[bi]) & (theta < bin_edges[bi + 1])
+            if mask.sum() > 0:
+                bin_r_mean[bi] = r[mask].mean()
+                bin_r_std[bi] = r[mask].std()
+                bin_count[bi] = mask.sum()
+
+        # Fit Archimedean spiral: r = a + b*θ
+        valid = bin_count > 2
+        spiral_fits = []
+        if valid.sum() > 10:
+            from numpy.polynomial import polynomial as P
+            coeffs = P.polyfit(bin_centers[valid], bin_r_mean[valid], deg=1)
+            a_fit, b_fit = float(coeffs[0]), float(coeffs[1])
+
+            # Generate fitted spiral curve(s)
+            for arm in range(n_arms):
+                offset = arm * (2 * np.pi / n_arms)
+                t_curve = np.linspace(-np.pi, np.pi, 200)
+                r_curve = a_fit + b_fit * (t_curve + offset)
+                r_curve = np.clip(r_curve, 0, r.max() * 1.2)
+                x_curve = cx + r_curve * np.cos(t_curve)
+                y_curve = cy + r_curve * np.sin(t_curve)
+                spiral_fits.append({
+                    'arm': arm,
+                    'x': x_curve.tolist(),
+                    'y': y_curve.tolist(),
+                    'r': r_curve.tolist(),
+                    'theta': t_curve.tolist(),
+                })
+
+            # Spiral coherence score: how well r correlates with θ
+            corr = float(np.corrcoef(theta[r > 0], r[r > 0])[0, 1]) \
+                if (r > 0).sum() > 10 else 0.0
+        else:
+            a_fit, b_fit, corr = 0, 0, 0
+            spiral_fits = []
+
+        # ── Build point arrays ──
+        points_2d = []
+        points_3d = []
+        points_polar = []
+        for i, fi in enumerate(sel):
+            points_2d.append({
+                'x': float(proj2d[i, 0]), 'y': float(proj2d[i, 1]),
+                'feature_idx': int(fi), 'strength': float(str_sel[i]),
+            })
+            points_3d.append({
+                'x': float(proj3d[i, 0]),
+                'y': float(proj3d[i, 1]),
+                'z': float(proj3d[i, 2]),
+                'feature_idx': int(fi), 'strength': float(str_sel[i]),
+            })
+            points_polar.append({
+                'r': float(r[i]), 'theta': float(theta[i]),
+                'feature_idx': int(fi), 'strength': float(str_sel[i]),
+            })
+
+        return jsonify({
+            'status': 'ok',
+            'points_2d': points_2d,
+            'points_3d': points_3d,
+            'points_polar': points_polar,
+            'spiral_fits': spiral_fits,
+            'spiral_params': {
+                'a': a_fit, 'b': b_fit,
+                'coherence': corr,
+                'n_arms_fitted': len(spiral_fits),
+            },
+            'angular_profile': {
+                'bin_centers': bin_centers.tolist(),
+                'mean_r': bin_r_mean.tolist(),
+                'std_r': bin_r_std.tolist(),
+                'count': bin_count.tolist(),
+            },
+            'reduction_meta': meta3d,
+        })
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+# ── Add to app.py ───────────────────────────────────────────
+
+@app.route('/api/vis3d/slice_view', methods=['POST'])
+def vis3d_slice_view():
+    """
+    True 2D or 3D slice through activation space.
+    Axes = actual neuron indices (not projected).
+    Plots multiple prompts in this real subspace.
+    """
+    try:
+        w = get_wrapper()
+        data = request.json
+        prompts = data.get('prompts', [])
+        layer_idx = data.get('layer_idx', 6)
+        # Neuron indices to use as axes (2 or 3)
+        axes = data.get('axes', None)              # e.g. [0, 128, 512]
+        auto_select = data.get('auto_select', True)  # pick highest-variance neurons
+
+        if len(prompts) < 2:
+            return jsonify({'status': 'error',
+                            'message': 'Need ≥ 2 prompts'}), 400
+
+        acts, labels = [], []
+        for p in prompts:
+            a = w.get_activations(p, layer=layer_idx)
+            if a is not None:
+                acts.append(a)
+                labels.append(p[:50])
+        if len(acts) < 2:
+            return jsonify({'status': 'error',
+                            'message': 'Too few activations'}), 400
+
+        mat = torch.stack(acts)  # [N, d_model]
+        mat_np = mat.numpy()
+
+        # ── Auto-select axes by variance ──
+        if axes is None or auto_select:
+            variances = mat_np.var(axis=0)
+            top_var = np.argsort(-variances)
+            n_axes = 3 if len(data.get('axes', [0, 0, 0])) == 3 else 3
+            axes = top_var[:n_axes].tolist()
+
+        n_dims = len(axes)
+        if n_dims < 2:
+            axes = axes + [0] * (2 - n_dims)
+        axes = axes[:3]
+
+        points = []
+        for i in range(len(labels)):
+            pt = {'label': labels[i]}
+            pt['x'] = float(mat_np[i, axes[0]])
+            pt['y'] = float(mat_np[i, axes[1]])
+            if len(axes) >= 3:
+                pt['z'] = float(mat_np[i, axes[2]])
+            points.append(pt)
+
+        # ── Decision boundary heatmap (2D grid sampling) ──
+        # Interpolate a grid in the 2D plane defined by axes[0], axes[1]
+        # holding all other dims at the mean
+        grid_res = data.get('grid_resolution', 40)
+        mean_act = mat_np.mean(axis=0)
+
+        x_vals = mat_np[:, axes[0]]
+        y_vals = mat_np[:, axes[1]]
+        x_range = np.linspace(x_vals.min() - 0.5, x_vals.max() + 0.5, grid_res)
+        y_range = np.linspace(y_vals.min() - 0.5, y_vals.max() + 0.5, grid_res)
+
+        # For each grid point, find nearest prompt (Voronoi-style decision boundary)
+        grid_labels = np.zeros((grid_res, grid_res), dtype=int)
+        grid_distances = np.zeros((grid_res, grid_res))
+
+        from scipy.spatial import KDTree
+        prompt_coords = np.column_stack([x_vals, y_vals])
+        tree = KDTree(prompt_coords)
+
+        for xi, xv in enumerate(x_range):
+            for yi, yv in enumerate(y_range):
+                dist, idx = tree.query([xv, yv])
+                grid_labels[yi, xi] = idx
+                grid_distances[yi, xi] = dist
+
+        return jsonify({
+            'status': 'ok',
+            'points': points,
+            'axes': axes,
+            'axes_variances': [float(mat_np[:, a].var()) for a in axes],
+            'n_dims': len(axes),
+            'decision_grid': {
+                'labels': grid_labels.tolist(),
+                'distances': grid_distances.tolist(),
+                'x_range': x_range.tolist(),
+                'y_range': y_range.tolist(),
+            },
+        })
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/vis3d/neuron_pair_heatmap', methods=['POST'])
+def vis3d_neuron_pair_heatmap():
+    """
+    Heatmap of activation co-occurrence for two neurons across many prompts.
+    Shows correlation structure in *real* neuron space.
+    """
+    try:
+        w = get_wrapper()
+        data = request.json
+        prompts = data.get('prompts', [])
+        layer_idx = data.get('layer_idx', 6)
+        top_k = data.get('top_k', 20)  # how many neuron pairs to show
+
+        acts = []
+        for p in prompts:
+            a = w.get_activations(p, layer=layer_idx)
+            if a is not None:
+                acts.append(a.numpy())
+        if len(acts) < 3:
+            return jsonify({'status': 'error',
+                            'message': 'Need ≥ 3 prompts'}), 400
+
+        mat = np.stack(acts)  # [N, d_model]
+
+        # Correlation matrix of neurons (across prompts)
+        # Only keep high-variance neurons
+        variances = mat.var(axis=0)
+        top_neurons = np.argsort(-variances)[:top_k]
+
+        sub = mat[:, top_neurons]  # [N, top_k]
+        corr = np.corrcoef(sub.T)  # [top_k, top_k]
+
+        return jsonify({
+            'status': 'ok',
+            'correlation_matrix': corr.tolist(),
+            'neuron_indices': top_neurons.tolist(),
+            'neuron_variances': variances[top_neurons].tolist(),
+            'n_prompts': len(acts),
+        })
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 def get_wrapper():
     global wrapper
@@ -494,24 +956,26 @@ def vis3d_activation_landscape():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
+# ── Replace the existing vis3d_multi_prompt in app.py ───────
+
 @app.route('/api/vis3d/multi_prompt', methods=['POST'])
 def vis3d_multi_prompt():
     """
-    PCA-3D scatter of multiple prompts' activations at one layer.
-    Shows how different inputs cluster in the representation space.
+    PCA / t-SNE / UMAP 3D scatter of multiple prompts' activations.
+    Now with cluster colouring and method selection.
     """
     try:
         w = get_wrapper()
         data = request.json
         prompts = data.get('prompts', [])
         layer_idx = data.get('layer_idx', 6)
+        method = data.get('reduction', 'pca')
 
         if len(prompts) < 3:
             return jsonify({'status': 'error',
-                            'message': 'Mindestens 3 Prompts nötig'}), 400
+                            'message': 'Need ≥ 3 prompts'}), 400
 
-        acts = []
-        labels = []
+        acts, labels = [], []
         for p in prompts:
             a = w.get_activations(p, layer=layer_idx)
             if a is not None:
@@ -520,10 +984,10 @@ def vis3d_multi_prompt():
 
         if len(acts) < 3:
             return jsonify({'status': 'error',
-                            'message': 'Zu wenige Aktivierungen'}), 400
+                            'message': 'Too few activations'}), 400
 
         mat = torch.stack(acts)
-        projected, explained = pca_reduce(mat, 3)
+        projected, meta = reduce_dims(mat, 3, method=method)
 
         points = [{'x': float(projected[i, 0]),
                     'y': float(projected[i, 1]),
@@ -533,12 +997,12 @@ def vis3d_multi_prompt():
 
         return jsonify({
             'status': 'ok', 'points': points,
-            'explained_variance': explained.tolist(),
+            'reduction_meta': meta,
+            'method': method,
         })
     except Exception as e:
         traceback.print_exc()
         return jsonify({'status': 'error', 'message': str(e)}), 500
-
 
 @app.route('/api/weight_stats/<int:layer_idx>', methods=['GET'])
 def weight_stats(layer_idx):

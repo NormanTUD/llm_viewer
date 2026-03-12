@@ -193,45 +193,102 @@ The capital of Australia is</textarea>
             <div class="panel"><h3>📊 SVD of Sub-Cluster</h3><div id="svd-plot" class="plot-box"></div></div>
         </div>
     </div>
+	<!-- ── TAB: 3-D Visualisation (ENHANCED) ─── -->
+	<div id="tab-vis3d" style="display:none">
+	    <div class="panel">
+		<h3>🌐 3-D Visualisation Controls</h3>
+		<input type="text" id="vis-text" value="The capital of Germany is"
+		       placeholder="Text for visualisation …"/>
 
-    <!-- ── TAB: 3-D Visualisation ────────── -->
-    <div id="tab-vis3d" style="display:none">
-        <div class="panel">
-            <h3>🌐 3-D Visualisation Controls</h3>
-            <input type="text" id="vis-text" value="The capital of Germany is"
-                   placeholder="Text for visualisation …"/>
-            <label style="color:#888;font-size:.85em">Layer for surface / feature space:</label>
-            <input type="text" id="vis-layer" value="6"/>
-            <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px">
-                <button onclick="visLayerTrajectory()">Layer Trajectory</button>
-                <button onclick="visActivationLandscape()">Activation Surface</button>
-                <button onclick="visFeatureSpace()">Feature Space</button>
-                <button onclick="visMultiPrompt()">Multi-Prompt Cluster</button>
-            </div>
-        </div>
-        <div class="vis-grid">
-            <div class="panel" id="vis-panel-trajectory" style="display:none">
-                <h3>🛤️ Layer Trajectory (PCA 3-D)</h3>
-                <p class="explained" id="traj-explained"></p>
-                <div id="vis-trajectory" class="plot-box"></div>
-            </div>
-            <div class="panel" id="vis-panel-surface" style="display:none">
-                <h3>🏔️ Activation Landscape</h3>
-                <p class="explained" id="surf-stats"></p>
-                <div id="vis-surface" class="plot-box"></div>
-            </div>
-            <div class="panel" id="vis-panel-features" style="display:none">
-                <h3>✨ SAE Feature Space (PCA 3-D)</h3>
-                <p class="explained" id="feat-explained"></p>
-                <div id="vis-features" class="plot-box"></div>
-            </div>
-            <div class="panel" id="vis-panel-multi" style="display:none">
-                <h3>🗂️ Multi-Prompt Clusters (PCA 3-D)</h3>
-                <p class="explained" id="multi-explained"></p>
-                <div id="vis-multi" class="plot-box"></div>
-            </div>
-        </div>
-    </div>
+		<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:10px 0">
+		    <div>
+			<label style="color:#888;font-size:.85em">Layer:</label>
+			<select id="vis-layer"></select>
+		    </div>
+		    <div>
+			<label style="color:#888;font-size:.85em">Reduction method:</label>
+			<select id="vis-reduction">
+			    <option value="pca">PCA</option>
+			    <option value="tsne">t-SNE</option>
+			    <option value="umap">UMAP</option>
+			</select>
+		    </div>
+		</div>
+
+		<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px">
+		    <button onclick="visLayerTrajectory()">🛤️ Layer Trajectory</button>
+		    <button onclick="visActivationLandscape()">🏔️ Activation Surface</button>
+		    <button onclick="visFeatureSpace()">✨ Feature Space</button>
+		    <button onclick="visMultiPrompt()">🗂️ Multi-Prompt</button>
+		    <button onclick="visSubclusters()" style="background:#e6a817;color:#000">
+			🔬 Subclusters</button>
+		    <button onclick="visSpiralAnalysis()" style="background:#17a8e6;color:#000">
+			🌀 Spiral Analysis</button>
+		    <button onclick="visSliceView()" style="background:#a817e6;color:#fff">
+			🔪 Real Slice</button>
+		    <button onclick="visNeuronHeatmap()" style="background:#e65017;color:#fff">
+			🧮 Neuron Correlation</button>
+		</div>
+	    </div>
+
+	    <div class="vis-grid">
+		<!-- Existing panels ... keep them ... -->
+		<div class="panel" id="vis-panel-trajectory" style="display:none">
+		    <h3>🛤️ Layer Trajectory</h3>
+		    <p class="explained" id="traj-explained"></p>
+		    <div id="vis-trajectory" class="plot-box"></div>
+		</div>
+		<div class="panel" id="vis-panel-surface" style="display:none">
+		    <h3>🏔️ Activation Landscape</h3>
+		    <p class="explained" id="surf-stats"></p>
+		    <div id="vis-surface" class="plot-box"></div>
+		</div>
+		<div class="panel" id="vis-panel-features" style="display:none">
+		    <h3>✨ SAE Feature Space</h3>
+		    <p class="explained" id="feat-explained"></p>
+		    <div id="vis-features" class="plot-box"></div>
+		</div>
+		<div class="panel" id="vis-panel-multi" style="display:none">
+		    <h3>🗂️ Multi-Prompt Clusters</h3>
+		    <p class="explained" id="multi-explained"></p>
+		    <div id="vis-multi" class="plot-box"></div>
+		</div>
+
+		<!-- ══ NEW PANELS ══ -->
+		<div class="panel" id="vis-panel-subclusters" style="display:none">
+		    <h3>🔬 Hierarchical Subclusters</h3>
+		    <p class="explained" id="subcluster-info"></p>
+		    <div id="vis-subclusters" class="plot-box"></div>
+		    <h3 style="margin-top:16px">🌳 Dendrogram</h3>
+		    <div id="vis-dendrogram" class="plot-box"></div>
+		</div>
+
+		<div class="panel" id="vis-panel-spiral" style="display:none">
+		    <h3>🌀 Spiral Analysis — 2D Feature Map</h3>
+		    <p class="explained" id="spiral-info"></p>
+		    <div id="vis-spiral-2d" class="plot-box"></div>
+		    <h3 style="margin-top:16px">📡 Polar View</h3>
+		    <div id="vis-spiral-polar" class="plot-box"></div>
+		    <h3 style="margin-top:16px">📊 Angular Profile (r vs θ)</h3>
+		    <div id="vis-spiral-profile" class="plot-box"></div>
+		</div>
+
+		<div class="panel" id="vis-panel-slice" style="display:none">
+		    <h3>🔪 Real Axis-Aligned Slice</h3>
+		    <p class="explained" id="slice-info"></p>
+		    <div id="vis-slice-scatter" class="plot-box"></div>
+		    <h3 style="margin-top:16px">🗺️ Decision Boundary (Voronoi)</h3>
+		    <div id="vis-slice-boundary" class="plot-box"></div>
+		</div>
+
+		<div class="panel" id="vis-panel-heatmap" style="display:none">
+		    <h3>🧮 Neuron–Neuron Correlation</h3>
+		    <p class="explained" id="heatmap-info"></p>
+		    <div id="vis-neuron-heatmap" class="plot-box"></div>
+		</div>
+	    </div>
+	</div>
+
 </div>
 </div>
 
@@ -242,6 +299,278 @@ const PLOTLY_DARK = {
     paper_bgcolor:'#151530', plot_bgcolor:'#151530',
     font:{color:'#888'}, margin:{t:30,b:40,l:40,r:20}
 };
+
+// ════════════════════════════════════════════
+//  ENHANCED VISUALISATION FUNCTIONS
+// ════════════════════════════════════════════
+
+function getVisOpts() {
+    return {
+        layer_idx: parseInt(document.getElementById('vis-layer').value),
+        reduction: document.getElementById('vis-reduction').value,
+    };
+}
+
+// ── Subclusters ────────────────────────────
+async function visSubclusters() {
+    const prompts = document.getElementById('domain-prompts').value
+        .split('\n').map(s => s.trim()).filter(Boolean);
+    const opts = getVisOpts();
+    if (prompts.length < 4) { setStatus('Need ≥ 4 prompts (use Extract tab)', 'error'); return; }
+    setStatus('Computing subclusters…', 'loading'); log('3D: subclusters');
+    try {
+        const res = await api('vis3d/subclusters', {
+            prompts, layer_idx: opts.layer_idx, reduction: opts.reduction
+        });
+        if (res.status !== 'ok') throw new Error(res.message);
+
+        const pts = res.points;
+        const clusterIds = [...new Set(pts.map(p => p.cluster))].sort((a,b) => a-b);
+        const colors = ['#6c63ff','#ff63c3','#63ffc3','#ffc363','#63c3ff',
+                        '#c363ff','#ff6363','#63ff63','#ffff63','#63ffff'];
+
+        // 3D scatter, coloured by cluster
+        const traces = clusterIds.map((cid, ci) => {
+            const cp = pts.filter(p => p.cluster === cid);
+            return {
+                x: cp.map(p => p.x), y: cp.map(p => p.y), z: cp.map(p => p.z),
+                mode: 'markers+text', type: 'scatter3d',
+                name: `Cluster ${cid} (${cp.length})`,
+                marker: { size: 7, color: colors[ci % colors.length], opacity: 0.9 },
+                text: cp.map(p => p.label), textposition: 'top center',
+                textfont: { size: 8, color: '#ccc' },
+                hoverinfo: 'text'
+            };
+        });
+
+        // Add centroids
+        traces.push({
+            x: res.centroids.map(c => c.x),
+            y: res.centroids.map(c => c.y),
+            z: res.centroids.map(c => c.z),
+            mode: 'markers', type: 'scatter3d', name: 'Centroids',
+            marker: { size: 14, color: '#fff', symbol: 'diamond', opacity: 0.6,
+                      line: { color: '#6c63ff', width: 2 } },
+            text: res.centroids.map(c => `Cluster ${c.cluster} (n=${c.size})`),
+            hoverinfo: 'text'
+        });
+
+        Plotly.newPlot('vis-subclusters', traces, {
+            ...PLOTLY_DARK,
+            scene: {
+                xaxis: {title: 'Dim 1', gridcolor: '#2a2a4a', color: '#666'},
+                yaxis: {title: 'Dim 2', gridcolor: '#2a2a4a', color: '#666'},
+                zaxis: {title: 'Dim 3', gridcolor: '#2a2a4a', color: '#666'},
+                bgcolor: '#151530'
+            }
+        });
+
+        document.getElementById('subcluster-info').textContent =
+            `${res.n_clusters} subclusters found | Silhouette: ${res.silhouette.toFixed(3)} | Method: ${res.method}`;
+
+        // ── Dendrogram (2D lines) ──
+        const dendro = res.dendrogram;
+        const dendTraces = dendro.icoord.map((ic, i) => ({
+            x: ic, y: dendro.dcoord[i],
+            mode: 'lines', type: 'scatter',
+            line: { color: dendro.color_list[i] || '#6c63ff', width: 1.5 },
+            showlegend: false, hoverinfo: 'skip'
+        }));
+        Plotly.newPlot('vis-dendrogram', dendTraces, {
+            ...PLOTLY_DARK,
+            xaxis: { showticklabels: false, gridcolor: '#2a2a4a' },
+            yaxis: { title: 'Distance', gridcolor: '#2a2a4a' },
+        });
+
+        document.getElementById('vis-panel-subclusters').style.display = 'block';
+        setStatus(`${res.n_clusters} subclusters found`, 'ok');
+    } catch(e) { setStatus(`Error: ${e.message}`, 'error'); log(`ERROR: ${e.message}`); }
+}
+
+
+// ── Spiral Analysis ────────────────────────
+async function visSpiralAnalysis() {
+    const text = document.getElementById('vis-text').value;
+    const opts = getVisOpts();
+    setStatus('Analysing spiral structure…', 'loading'); log('3D: spiral analysis');
+    try {
+        const res = await api('vis3d/spiral_analysis', {
+            text, layer_idx: opts.layer_idx, reduction: opts.reduction
+        });
+        if (res.status !== 'ok') throw new Error(res.message);
+
+        const pts = res.points_2d;
+        const maxS = Math.max(...pts.map(p => p.strength), 1e-9);
+
+        // ── 2D scatter with spiral overlays ──
+        const scatterTrace = {
+            x: pts.map(p => p.x), y: pts.map(p => p.y),
+            mode: 'markers', type: 'scatter',
+            marker: {
+                size: pts.map(p => 4 + Math.min(p.strength / maxS * 10, 12)),
+                color: pts.map(p => p.strength),
+                colorscale: 'Hot', showscale: true,
+                colorbar: { title: 'Activation', tickfont: {color:'#888'} },
+                opacity: 0.7
+            },
+            text: pts.map(p => `#${p.feature_idx} str=${p.strength.toFixed(3)}`),
+            hoverinfo: 'text', name: 'Features'
+        };
+
+        const spiralTraces = res.spiral_fits.map((arm, i) => ({
+            x: arm.x, y: arm.y,
+            mode: 'lines', type: 'scatter',
+            line: { color: ['#6c63ff','#ff63c3','#63ffc3'][i % 3], width: 2, dash: 'dot' },
+            name: `Spiral arm ${i}`, hoverinfo: 'skip'
+        }));
+
+        Plotly.newPlot('vis-spiral-2d', [scatterTrace, ...spiralTraces], {
+            ...PLOTLY_DARK,
+            xaxis: { title: 'Dim 1', gridcolor: '#2a2a4a', scaleanchor: 'y' },
+            yaxis: { title: 'Dim 2', gridcolor: '#2a2a4a' },
+        });
+
+        // ── Polar view ──
+        const polar = res.points_polar;
+        Plotly.newPlot('vis-spiral-polar', [{
+            r: polar.map(p => p.r),
+            theta: polar.map(p => p.theta * 180 / Math.PI),
+            mode: 'markers', type: 'scatterpolar',
+            marker: {
+                size: 4, color: polar.map(p => p.strength),
+                colorscale: 'Viridis', showscale: true
+            },
+            text: polar.map(p => `#${p.feature_idx}`),
+            hoverinfo: 'text'
+        }], {
+            ...PLOTLY_DARK,
+            polar: {
+                bgcolor: '#151530',
+                radialaxis: { gridcolor: '#2a2a4a', color: '#666' },
+                angularaxis: { gridcolor: '#2a2a4a', color: '#666' }
+            }
+        });
+
+        // ── Angular profile ──
+        const ap = res.angular_profile;
+        Plotly.newPlot('vis-spiral-profile', [{
+            x: ap.bin_centers.map(v => (v * 180 / Math.PI).toFixed(1) + '°'),
+            y: ap.mean_r,
+            type: 'bar',
+            marker: { color: ap.count.map(c => `rgba(108,99,255,${Math.min(c/10,1)})`) },
+            error_y: { type: 'data', array: ap.std_r, visible: true, color: '#ff63c3' },
+            name: 'Mean r'
+        }], {
+            ...PLOTLY_DARK,
+            xaxis: { title: 'Angle (°)', gridcolor: '#2a2a4a' },
+            yaxis: { title: 'Mean radius', gridcolor: '#2a2a4a' },
+        });
+
+        const sp = res.spiral_params;
+        document.getElementById('spiral-info').textContent =
+            `Spiral coherence: ${sp.coherence.toFixed(3)} | ` +
+            `Fit: r = ${sp.a.toFixed(3)} + ${sp.b.toFixed(3)}·θ | ` +
+            `${sp.n_arms_fitted} arms fitted | ${pts.length} features`;
+
+        document.getElementById('vis-panel-spiral').style.display = 'block';
+        setStatus('Spiral analysis complete', 'ok');
+    } catch(e) { setStatus(`Error: ${e.message}`, 'error'); log(`ERROR: ${e.message}`); }
+}
+
+
+// ── Real Slice View ────────────────────────
+async function visSliceView() {
+    const prompts = document.getElementById('domain-prompts').value
+        .split('\n').map(s => s.trim()).filter(Boolean);
+    const opts = getVisOpts();
+    if (prompts.length < 2) { setStatus('Need ≥ 2 prompts', 'error'); return; }
+    setStatus('Computing axis-aligned slice…', 'loading'); log('3D: real slice');
+    try {
+        const res = await api('vis3d/slice_view', {
+            prompts, layer_idx: opts.layer_idx, auto_select: true
+        });
+        if (res.status !== 'ok') throw new Error(res.message);
+
+        const pts = res.points;
+        const axes = res.axes;
+
+        // ── 3D real-neuron scatter ──
+        Plotly.newPlot('vis-slice-scatter', [{
+            x: pts.map(p => p.x), y: pts.map(p => p.y),
+            z: pts.map(p => p.z || 0),
+            mode: 'markers+text', type: pts[0].z !== undefined ? 'scatter3d' : 'scatter',
+            marker: { size: 8, color: '#6c63ff', opacity: 0.9 },
+            text: pts.map(p => p.label), textposition: 'top center',
+            textfont: { size: 8, color: '#ccc' }, hoverinfo: 'text'
+        }], {
+            ...PLOTLY_DARK,
+            scene: {
+                xaxis: {title: `Neuron ${axes[0]}`, gridcolor:'#2a2a4a', color:'#666'},
+                yaxis: {title: `Neuron ${axes[1]}`, gridcolor:'#2a2a4a', color:'#666'},
+                zaxis: {title: `Neuron ${axes[2]}`, gridcolor:'#2a2a4a', color:'#666'},
+                bgcolor: '#151530'
+            }
+        });
+
+        // ── Decision boundary heatmap ──
+        const dg = res.decision_grid;
+        Plotly.newPlot('vis-slice-boundary', [{
+            z: dg.distances, x: dg.x_range, y: dg.y_range,
+            type: 'heatmap', colorscale: 'Portland',
+            showscale: true,
+            colorbar: { title: 'Distance', tickfont: {color:'#888'} }
+        }, {
+            x: pts.map(p => p.x), y: pts.map(p => p.y),
+            mode: 'markers+text', type: 'scatter',
+            marker: { size: 10, color: '#fff', line: {color:'#6c63ff', width:2} },
+            text: pts.map(p => p.label), textposition: 'top center',
+            textfont: { size: 8, color: '#fff' }, hoverinfo: 'text'
+        }], {
+            ...PLOTLY_DARK,
+            xaxis: { title: `Neuron ${axes[0]} (raw)`, gridcolor: '#2a2a4a' },
+            yaxis: { title: `Neuron ${axes[1]} (raw)`, gridcolor: '#2a2a4a' },
+        });
+
+        document.getElementById('slice-info').textContent =
+            `Axes: neurons [${axes.join(', ')}] | Variance: [${res.axes_variances.map(v=>v.toFixed(3)).join(', ')}]`;
+        document.getElementById('vis-panel-slice').style.display = 'block';
+        setStatus('Slice view ready', 'ok');
+    } catch(e) { setStatus(`Error: ${e.message}`, 'error'); log(`ERROR: ${e.message}`); }
+}
+
+
+// ── Neuron Correlation Heatmap ─────────────
+async function visNeuronHeatmap() {
+    const prompts = document.getElementById('domain-prompts').value
+        .split('\n').map(s => s.trim()).filter(Boolean);
+    const opts = getVisOpts();
+    if (prompts.length < 3) { setStatus('Need ≥ 3 prompts', 'error'); return; }
+    setStatus('Computing neuron correlations…', 'loading'); log('3D: neuron heatmap');
+    try {
+        const res = await api('vis3d/neuron_pair_heatmap', {
+            prompts, layer_idx: opts.layer_idx, top_k: 30
+        });
+        if (res.status !== 'ok') throw new Error(res.message);
+
+        const labels = res.neuron_indices.map(i => `N${i}`);
+        Plotly.newPlot('vis-neuron-heatmap', [{
+            z: res.correlation_matrix,
+            x: labels, y: labels,
+            type: 'heatmap', colorscale: 'RdBu',
+            zmin: -1, zmax: 1, showscale: true,
+            colorbar: { title: 'Correlation', tickfont: {color:'#888'} }
+        }], {
+            ...PLOTLY_DARK,
+            xaxis: { title: 'Neuron', gridcolor: '#2a2a4a', tickangle: 45 },
+            yaxis: { title: 'Neuron', gridcolor: '#2a2a4a' },
+        });
+
+        document.getElementById('heatmap-info').textContent =
+            `Top ${res.neuron_indices.length} neurons by variance | ${res.n_prompts} prompts`;
+        document.getElementById('vis-panel-heatmap').style.display = 'block';
+        setStatus('Neuron correlation heatmap ready', 'ok');
+    } catch(e) { setStatus(`Error: ${e.message}`, 'error'); log(`ERROR: ${e.message}`); }
+}
 
 function populateLayerSelects(nLayers) {
     const selects = [
