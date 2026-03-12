@@ -28,10 +28,14 @@ from utils.projection import (
 from utils.clustering import (
     cluster_kmeans, cluster_vocab_embeddings, find_neighbors_in_embedding,
 )
+
 from utils.pattern_finder import (
-    PATTERN_GENERATORS, scan_all_layers_for_pattern,
-    scan_all_patterns_in_layer,
+    PATTERN_GENERATORS,
+    filter_vocab_tokens,
+    find_pattern_in_embeddings,
+    scan_all_patterns,
 )
+
 
 app = Flask(__name__)
 
@@ -423,8 +427,11 @@ def api_token_neighbors():
 
 @app.route("/api/patterns/available", methods=["GET"])
 def api_available_patterns():
-    return jsonify(list(PATTERN_GENERATORS.keys()))
-
+    return jsonify({
+        "patterns": list(PATTERN_GENERATORS.keys()),
+        "filters": ["all", "numbers", "years", "words", "letters",
+                     "months", "colors", "regex"],
+    })
 
 @app.route("/api/patterns/scan", methods=["POST"])
 def api_pattern_scan():
@@ -447,44 +454,99 @@ def api_pattern_scan():
 
 @app.route("/api/patterns/scan_all", methods=["POST"])
 def api_pattern_scan_all():
-    """Scan all patterns for a specific layer."""
+    """Scan all pattern types against a token filter. Which pattern fits best?"""
     data = request.json
-    trace_key = data.get("trace_key", "")
-    layer_idx = data.get("layer", 0)
+    model_key = data.get("model", "gpt2")
+    filter_type = data.get("filter", "all")
+    sample_size = data.get("sample_size", 5000)
     projection = data.get("projection", "pca")
 
-    trace = _trace_cache.get(trace_key)
-    if trace is None:
-        return jsonify({"error": "Trace not found."}), 404
-
-    results = scan_all_patterns_in_layer(trace, layer_idx, projection_method=projection)
-    return jsonify({
-        "layer": layer_idx,
-        "pattern_matches": results,
-    })
-
+    results = scan_all_patterns(
+        model_key=model_key,
+        filter_type=filter_type,
+        sample_size=sample_size,
+        projection_method=projection,
+    )
+    return jsonify({"results": results, "filter": filter_type})
 
 @app.route("/api/patterns/generate", methods=["POST"])
 def api_pattern_generate():
-    """Generate a pattern for visualization."""
+    """Generate a pattern template for preview."""
     data = request.json
-    pattern_name = data.get("pattern", "spiral")
-    n_points = data.get("n_points", 100)
-
-    generator = PATTERN_GENERATORS.get(pattern_name)
-    if generator is None:
-        return jsonify({"error": f"Unknown pattern: {pattern_name}"}), 400
-
+    name = data.get("pattern", "spiral")
+    n = data.get("n_points", 200)
+    gen = PATTERN_GENERATORS.get(name)
+    if not gen:
+        return jsonify({"error": f"Unknown pattern: {name}"}), 400
     try:
-        points = generator(n_points=n_points)
+        pts = gen(n_points=n)
     except TypeError:
-        points = generator()
+        pts = gen()
+    return jsonify({"pattern": name, "points": pts.tolist()})
 
+@app.route("/api/patterns/filter_preview", methods=["POST"])
+def api_filter_preview():
+    """Preview which tokens match a filter (so user can see before searching)."""
+    data = request.json
+    model_key = data.get("model", "gpt2")
+    filter_type = data.get("filter", "all")
+    custom_regex = data.get("regex", None)
+    max_show = data.get("max_show", 200)
+
+    tokens = filter_vocab_tokens(model_key, filter_type, custom_regex, max_tokens=max_show)
     return jsonify({
-        "pattern": pattern_name,
-        "points": points.tolist(),
+        "filter": filter_type,
+        "count": len(tokens),
+        "tokens": [{"id": t[0], "text": t[1]} for t in tokens[:max_show]],
     })
 
+@app.route("/api/patterns/search", methods=["POST"])
+def api_pattern_search():
+    """
+    MAIN ENDPOINT: Search the embedding space for tokens that form a pattern.
+    This is the core feature.
+    """
+    data = request.json
+    model_key = data.get("model", "gpt2")
+    pattern_name = data.get("pattern", "helix")
+    n_points = data.get("n_pattern_points", 50)
+    filter_type = data.get("filter", "all")
+    custom_regex = data.get("regex", None)
+    sample_size = data.get("sample_size", 10000)
+    search_method = data.get("search_method", "both")
+    projection = data.get("projection", "pca")
+    search_subspaces = data.get("search_subspaces", False)
+
+    # Optional: search within a layer's hidden states
+    trace_key = data.get("trace_key", None)
+    layer_idx = data.get("layer", None)
+
+    layer_hs = None
+    layer_toks = None
+    if trace_key and layer_idx is not None:
+        trace = _trace_cache.get(trace_key)
+        if trace:
+            layer_hs = trace["hidden_states"][layer_idx]
+            # Recover token labels from trace key
+            text = ":".join(trace_key.split(":")[1:])
+            tok_data = tokenize_text(text, model_key)
+            layer_toks = tok_data["tokens"]
+
+    result = find_pattern_in_embeddings(
+        model_key=model_key,
+        pattern_name=pattern_name,
+        n_pattern_points=n_points,
+        filter_type=filter_type,
+        custom_regex=custom_regex,
+        sample_size=sample_size,
+        search_method=search_method,
+        projection_method=projection,
+        search_subspaces=search_subspaces,
+        layer_hidden_states=layer_hs,
+        layer_tokens=layer_toks,
+    )
+
+    return jsonify(result)
 
 # ─── Run ──────────────────────────────────────────────────────────
 

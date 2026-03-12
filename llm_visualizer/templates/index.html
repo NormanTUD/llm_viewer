@@ -173,26 +173,86 @@
 
 <!-- ─── Tab: Pattern Finder ───────────────────────────────── -->
 <div id="tab-patterns" class="tab-content">
-    <h2>Automatic Pattern Finder</h2>
+    <h2>🔎 Real Embedding Pattern Discovery</h2>
+    <p class="hint">
+        Find <b>real tokens</b> in the embedding space that form geometric patterns.
+        E.g., discover that year tokens sit on a helix, or numbers form a spiral.
+    </p>
+
     <div class="controls-row">
-        <label>Pattern: </label>
+        <label>Pattern:</label>
         <select id="pattern-select">
-            <option value="spiral">Spiral</option>
+            <option value="helix">Helix (years, cycles)</option>
+            <option value="spiral">Spiral (expanding)</option>
             <option value="circle">Circle</option>
-            <option value="line">Line</option>
-            <option value="helix">Helix</option>
-            <option value="sphere">Sphere Surface</option>
-            <option value="grid">Grid</option>
-            <option value="clusters">Cluster Pattern</option>
+            <option value="line">Line (linear)</option>
+            <option value="sphere">Sphere surface</option>
+            <option value="grid">Grid (flat)</option>
+            <option value="clusters">Clusters</option>
+            <option value="figure_eight">Figure-eight</option>
+            <option value="torus_knot">Torus knot</option>
         </select>
-        <button id="btn-scan-pattern" class="btn-secondary">🔎 Scan All Layers</button>
-        <button id="btn-scan-all-patterns" class="btn-secondary">🔎 Scan All Patterns (current layer)</button>
+
+        <label>Filter tokens:</label>
+        <select id="pattern-filter">
+            <option value="all">All tokens (sampled)</option>
+            <option value="numbers">Numbers only</option>
+            <option value="years">Years (1000-2100)</option>
+            <option value="words">Words (alphabetic)</option>
+            <option value="letters">Single letters</option>
+            <option value="months">Month names</option>
+            <option value="colors">Color words</option>
+            <option value="regex">Custom regex...</option>
+        </select>
+
+        <input type="text" id="pattern-regex" placeholder="Custom regex (if filter=regex)"
+               style="display:none; width:150px;">
     </div>
+
+    <div class="controls-row">
+        <label>Pattern points:</label>
+        <input type="number" id="pattern-n-points" value="40" min="10" max="200" style="width:70px;">
+
+        <label>Sample size:</label>
+        <input type="number" id="pattern-sample-size" value="10000" min="100" max="50000" style="width:90px;">
+
+        <label>Search:</label>
+        <select id="pattern-search-method">
+            <option value="both">ICP + Greedy (best)</option>
+            <option value="icp">ICP only</option>
+            <option value="greedy">Greedy curve only</option>
+        </select>
+
+        <label>
+            <input type="checkbox" id="pattern-search-subspaces"> Search subspaces
+        </label>
+    </div>
+
+    <div class="controls-row">
+        <button id="btn-preview-pattern" class="btn-secondary">👁 Preview Pattern</button>
+        <button id="btn-preview-filter" class="btn-secondary">📋 Preview Filter</button>
+        <button id="btn-search-pattern" class="btn-primary">🔎 Find Pattern in Embeddings</button>
+        <button id="btn-scan-all-patterns" class="btn-secondary">📊 Scan All Patterns</button>
+    </div>
+
+    <div id="filter-preview" class="hint" style="margin:8px 0;"></div>
+
     <div class="viz-container">
-        <div id="pattern-preview" class="plot-3d"></div>
-        <div id="pattern-results" class="plot-3d"></div>
+        <div id="pattern-main-plot" class="plot-3d"></div>
+        <div id="pattern-info" class="info-panel">
+            <h3>Pattern Discovery</h3>
+            <p>Select a pattern and filter, then click <b>"Find Pattern in Embeddings"</b>
+               to search the real embedding space.</p>
+            <p>The tool will find actual tokens whose positions form that shape.</p>
+            <hr style="border-color:#30363d; margin:10px 0">
+            <p><b>Helix + Years:</b> Try "helix" pattern with "years" filter.</p>
+            <p><b>Line + Numbers:</b> Try "line" pattern with "numbers" filter.</p>
+            <p><b>Clusters + Words:</b> Try "clusters" with "words" filter.</p>
+        </div>
     </div>
-    <div id="pattern-ranking" class="info-panel"></div>
+
+    <div id="pattern-ranking" class="info-panel" style="margin-top:16px;"></div>
+    <div id="pattern-bar-chart" class="plot-small"></div>
 </div>
 
 {% endblock %}
