@@ -3,6 +3,7 @@ Level 5: Flask application — ties everything together with API endpoints
 and serves the frontend.
 """
 from flask import Flask, render_template, request, jsonify
+from flask import Response, stream_with_context
 import numpy as np
 import json
 
@@ -32,9 +33,12 @@ from utils.clustering import (
 from utils.pattern_finder import (
     PATTERN_GENERATORS,
     filter_vocab_tokens,
-    find_pattern_in_embeddings,
+    progressive_search,
+    find_pattern_sync,
     scan_all_patterns,
+    clear_caches,
 )
+
 
 
 app = Flask(__name__)
@@ -451,33 +455,30 @@ def api_pattern_scan():
         "results": results,
     })
 
+@app.route("/api/patterns/clear_cache", methods=["POST"])
+def api_clear_cache():
+    clear_caches()
+    return jsonify({"status": "ok"})
 
 @app.route("/api/patterns/scan_all", methods=["POST"])
 def api_pattern_scan_all():
-    """Scan all pattern types against a token filter. Which pattern fits best?"""
     data = request.json
-    model_key = data.get("model", "gpt2")
-    filter_type = data.get("filter", "all")
-    sample_size = data.get("sample_size", 5000)
-    projection = data.get("projection", "pca")
-
     results = scan_all_patterns(
-        model_key=model_key,
-        filter_type=filter_type,
-        sample_size=sample_size,
-        projection_method=projection,
+        model_key=data.get("model", "gpt2"),
+        filter_type=data.get("filter", "all"),
+        sample_size=data.get("sample_size", 5000),
+        projection=data.get("projection", "pca"),
     )
-    return jsonify({"results": results, "filter": filter_type})
+    return jsonify({"results": results, "filter": data.get("filter", "all")})
 
 @app.route("/api/patterns/generate", methods=["POST"])
 def api_pattern_generate():
-    """Generate a pattern template for preview."""
     data = request.json
     name = data.get("pattern", "spiral")
     n = data.get("n_points", 200)
     gen = PATTERN_GENERATORS.get(name)
     if not gen:
-        return jsonify({"error": f"Unknown pattern: {name}"}), 400
+        return jsonify({"error": f"Unknown: {name}"}), 400
     try:
         pts = gen(n_points=n)
     except TypeError:
@@ -486,67 +487,89 @@ def api_pattern_generate():
 
 @app.route("/api/patterns/filter_preview", methods=["POST"])
 def api_filter_preview():
-    """Preview which tokens match a filter (so user can see before searching)."""
     data = request.json
-    model_key = data.get("model", "gpt2")
-    filter_type = data.get("filter", "all")
-    custom_regex = data.get("regex", None)
-    max_show = data.get("max_show", 200)
-
-    tokens = filter_vocab_tokens(model_key, filter_type, custom_regex, max_tokens=max_show)
+    ids, toks = filter_vocab_tokens(
+        data.get("model", "gpt2"),
+        data.get("filter", "all"),
+        data.get("regex", None),
+        max_tokens=200,
+    )
     return jsonify({
-        "filter": filter_type,
-        "count": len(tokens),
-        "tokens": [{"id": t[0], "text": t[1]} for t in tokens[:max_show]],
+        "filter": data.get("filter", "all"),
+        "count": len(ids),
+        "tokens": [{"id": ids[i], "text": toks[i]} for i in range(len(ids))],
     })
 
+# Keep non-streaming version for scan_all and simple calls
 @app.route("/api/patterns/search", methods=["POST"])
 def api_pattern_search():
+    data = request.json
+    result = find_pattern_sync(
+        model_key=data.get("model", "gpt2"),
+        pattern_name=data.get("pattern", "helix"),
+        n_pattern_points=data.get("n_pattern_points", 40),
+        filter_type=data.get("filter", "all"),
+        custom_regex=data.get("regex", None),
+        sample_size=data.get("sample_size", 10000),
+        projection=data.get("projection", "pca"),
+        search_subspaces=data.get("search_subspaces", False),
+    )
+    return jsonify(result)
+
+@app.route("/api/patterns/search_stream", methods=["POST"])
+def api_pattern_search_stream():
     """
-    MAIN ENDPOINT: Search the embedding space for tokens that form a pattern.
-    This is the core feature.
+    SSE endpoint: streams progressive search results in real time.
+    Each event is a JSON message the frontend can render immediately.
     """
     data = request.json
     model_key = data.get("model", "gpt2")
     pattern_name = data.get("pattern", "helix")
-    n_points = data.get("n_pattern_points", 50)
+    n_points = data.get("n_pattern_points", 40)
     filter_type = data.get("filter", "all")
     custom_regex = data.get("regex", None)
     sample_size = data.get("sample_size", 10000)
-    search_method = data.get("search_method", "both")
     projection = data.get("projection", "pca")
     search_subspaces = data.get("search_subspaces", False)
 
-    # Optional: search within a layer's hidden states
+    # Optional layer-based search
     trace_key = data.get("trace_key", None)
     layer_idx = data.get("layer", None)
-
     layer_hs = None
     layer_toks = None
     if trace_key and layer_idx is not None:
         trace = _trace_cache.get(trace_key)
         if trace:
             layer_hs = trace["hidden_states"][layer_idx]
-            # Recover token labels from trace key
             text = ":".join(trace_key.split(":")[1:])
             tok_data = tokenize_text(text, model_key)
             layer_toks = tok_data["tokens"]
 
-    result = find_pattern_in_embeddings(
-        model_key=model_key,
-        pattern_name=pattern_name,
-        n_pattern_points=n_points,
-        filter_type=filter_type,
-        custom_regex=custom_regex,
-        sample_size=sample_size,
-        search_method=search_method,
-        projection_method=projection,
-        search_subspaces=search_subspaces,
-        layer_hidden_states=layer_hs,
-        layer_tokens=layer_toks,
+    def generate():
+        for update in progressive_search(
+            model_key=model_key,
+            pattern_name=pattern_name,
+            n_pattern_points=n_points,
+            filter_type=filter_type,
+            custom_regex=custom_regex,
+            sample_size=sample_size,
+            projection=projection,
+            search_subspaces=search_subspaces,
+            layer_hidden_states=layer_hs,
+            layer_tokens=layer_toks,
+        ):
+            yield f"data: {json.dumps(update)}\n\n"
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",  # Disable nginx buffering
+        },
     )
 
-    return jsonify(result)
+
 
 # ─── Run ──────────────────────────────────────────────────────────
 
