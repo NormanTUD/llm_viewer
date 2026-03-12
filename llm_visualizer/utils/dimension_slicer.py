@@ -8,7 +8,7 @@ Supports syntax like:
   "0:768:3"           -> every 3rd dimension
 """
 import numpy as np
-from typing import List, Union
+from typing import List, Union, Dict
 
 
 def parse_dim_spec(spec: str, max_dim: int) -> List[int]:
