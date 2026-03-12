@@ -321,10 +321,17 @@ def filter_vocab_tokens(model_key, filter_type="all", custom_regex=None,
         if filter_type == "all":
             keep = True
         elif filter_type == "numbers":
-            keep = s.lstrip("-").replace(".", "", 1).isdigit()
+            try:
+                float(s)
+                keep = all(c in '0123456789.-' for c in s)
+            except (ValueError, TypeError):
+                keep = False
         elif filter_type == "years":
-            keep = s.isdigit() and 1000 <= int(s) <= 2100
-        elif filter_type == "words":
+            if len(s) == 4 and all(c in '0123456789' for c in s):
+                try:
+                    keep = 1000 <= int(s) <= 2100
+                except ValueError:
+                    keep = False
             keep = s.isalpha() and len(s) >= 2
         elif filter_type == "letters":
             keep = s.isalpha() and len(s) == 1
