@@ -1,0 +1,527 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🧠 Holographic Knowledge Extractor</title>
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <style>
+        *{margin:0;padding:0;box-sizing:border-box}
+        body{font-family:'Segoe UI',system-ui,sans-serif;background:#0a0a1a;color:#e0e0e0;min-height:100vh}
+        .header{background:linear-gradient(135deg,#1a1a3e,#2a1a4e);padding:20px 30px;border-bottom:2px solid #6c63ff}
+        .header h1{color:#6c63ff;font-size:1.5em}
+        .header .subtitle{color:#888;font-size:.9em;margin-top:4px}
+        .container{display:flex;min-height:calc(100vh - 80px)}
+        .sidebar{width:300px;background:#111128;padding:20px;border-right:1px solid #2a2a4a;overflow-y:auto}
+        .main{flex:1;padding:20px;overflow-y:auto}
+        .panel{background:#151530;border:1px solid #2a2a4a;border-radius:10px;padding:20px;margin-bottom:20px}
+        .panel h3{color:#6c63ff;margin-bottom:15px;font-size:1.1em;border-bottom:1px solid #2a2a4a;padding-bottom:8px}
+        input[type="text"],textarea,select{width:100%;padding:10px;background:#1a1a3a;border:1px solid #3a3a5a;border-radius:6px;color:#e0e0e0;font-family:monospace;font-size:.9em;margin-bottom:10px}
+        textarea{resize:vertical;min-height:80px}
+        button{padding:10px 20px;background:#6c63ff;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:.9em;margin:4px 2px;transition:background .3s}
+        button:hover{background:#5a52dd}button:disabled{background:#3a3a5a;cursor:not-allowed}
+        button.secondary{background:#2a4a3a}button.secondary:hover{background:#3a6a4a}
+        .model-info{background:#1a1a3a;padding:10px;border-radius:6px;font-family:monospace;font-size:.85em;line-height:1.8}
+        .model-info .label{color:#888}.model-info .value{color:#6c63ff;font-weight:bold}
+        .status-bar{padding:8px 12px;border-radius:6px;margin-bottom:10px;font-size:.85em}
+        .status-ok{background:#1a3a2a;color:#4ade80}
+        .status-error{background:#3a1a1a;color:#f87171}
+        .status-loading{background:#1a2a3a;color:#60a5fa}
+        .predictions-table{width:100%;border-collapse:collapse;font-family:monospace}
+        .predictions-table th,.predictions-table td{padding:6px 10px;text-align:left;border-bottom:1px solid #2a2a4a}
+        .predictions-table th{color:#888;font-size:.8em}
+        .prob-bar{height:8px;background:#6c63ff;border-radius:4px}
+        .token-display{display:flex;flex-wrap:wrap;gap:4px;margin:10px 0}
+        .token{padding:4px 8px;background:#1a2a3a;border-radius:4px;font-family:monospace;font-size:.85em}
+        .feature-list{max-height:300px;overflow-y:auto}
+        .feature-item{display:flex;align-items:center;padding:6px 0;border-bottom:1px solid #1a1a3a;font-family:monospace;font-size:.85em}
+        .feature-item .idx{color:#888;width:60px}
+        .feature-item .bar-container{flex:1;margin:0 10px}
+        .feature-bar{height:6px;background:linear-gradient(90deg,#6c63ff,#ff63c3);border-radius:3px}
+        .tabs{display:flex;gap:2px;margin-bottom:15px;flex-wrap:wrap}
+        .tab{padding:8px 16px;background:#1a1a3a;border:1px solid #2a2a4a;border-bottom:none;border-radius:6px 6px 0 0;cursor:pointer;color:#888;font-size:.9em}
+        .tab.active{background:#151530;color:#6c63ff;border-color:#6c63ff}
+        .plot-box{width:100%;min-height:400px}
+        .log{background:#0a0a1a;padding:10px;border-radius:6px;font-family:monospace;font-size:.8em;max-height:200px;overflow-y:auto;white-space:pre-wrap;color:#888}
+        .vis-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+        @media(max-width:1000px){.vis-grid{grid-template-columns:1fr}}
+        .explained{font-size:.8em;color:#888;margin-top:4px}
+        .optgroup-label{color:#6c63ff;font-weight:bold}
+	select {
+		appearance: auto;
+	}
+	input[type="range"] {
+		-webkit-appearance: auto;
+		height: 6px;
+		background: #1a1a3a;
+		border-radius: 3px;
+		outline: none;
+		cursor: pointer;
+	}
+
+    </style>
+</head>
+<body>
+
+<div class="header">
+    <h1>🧠 Holographic Knowledge Extractor</h1>
+    <div class="subtitle">Extract &amp; visualise knowledge sub-clusters — multi-model, 3-D</div>
+</div>
+
+<div class="container">
+<!-- ══ Sidebar ═══════════════════════════════ -->
+<div class="sidebar">
+    <div class="panel">
+        <h3>📦 Model</h3>
+        <select id="model-select">
+            <optgroup label="GPT-2">
+                <option value="gpt2">GPT-2 (124 M)</option>
+                <option value="gpt2-medium">GPT-2 Medium (355 M)</option>
+                <option value="gpt2-large">GPT-2 Large (774 M)</option>
+                <option value="gpt2-xl">GPT-2 XL (1.5 B)</option>
+            </optgroup>
+            <optgroup label="GPT-Neo">
+                <option value="gpt-neo-125M">GPT-Neo 125 M</option>
+                <option value="gpt-neo-1.3B">GPT-Neo 1.3 B</option>
+                <option value="gpt-neo-2.7B">GPT-Neo 2.7 B</option>
+            </optgroup>
+            <optgroup label="GPT-J">
+                <option value="gpt-j-6B">GPT-J 6 B</option>
+            </optgroup>
+            <optgroup label="Pythia">
+                <option value="pythia-70m">Pythia 70 M</option>
+                <option value="pythia-160m">Pythia 160 M</option>
+                <option value="pythia-410m">Pythia 410 M</option>
+                <option value="pythia-1b">Pythia 1 B</option>
+                <option value="pythia-1.4b">Pythia 1.4 B</option>
+            </optgroup>
+            <optgroup label="OPT">
+                <option value="opt-125m">OPT 125 M</option>
+                <option value="opt-350m">OPT 350 M</option>
+                <option value="opt-1.3b">OPT 1.3 B</option>
+            </optgroup>
+        </select>
+        <button onclick="loadModel()" id="btn-load">Load model</button>
+        <div id="model-info" class="model-info" style="margin-top:10px;display:none"></div>
+    </div>
+    <div class="panel">
+        <h3>🔧 SAE Settings</h3>
+	<label style="color:#888;font-size:.85em">Layer index:</label>
+	<select id="sae-layer">
+	    <option value="" disabled selected>— load a model first —</option>
+	</select>
+	<label style="color:#888;font-size:.85em">Layer for surface / feature space:</label>
+	<select id="vis-layer">
+	    <option value="" disabled selected>— load a model first —</option>
+	</select>
+	<label style="color:#888;font-size:.85em"># Features: <span id="sae-features-display" style="color:#6c63ff;font-weight:bold">2048</span></label>
+	<input type="range" id="sae-features" min="128" max="8192" step="128" value="2048"
+	       oninput="document.getElementById('sae-features-display').textContent=this.value"
+	       style="width:100%;accent-color:#6c63ff;margin-bottom:10px"/>
+
+        <label style="color:#888;font-size:.85em">Training steps:</label>
+        <input type="text" id="sae-steps" value="200"/>
+        <button onclick="trainSAE()" id="btn-sae">Train SAE</button>
+    </div>
+    <div class="panel">
+        <h3>📋 Log</h3>
+        <div id="log" class="log">Ready.\n</div>
+    </div>
+</div>
+
+<!-- ══ Main ══════════════════════════════════ -->
+<div class="main">
+    <div id="status" class="status-bar status-ok">✓ Ready — please load a model</div>
+
+    <div class="tabs">
+        <div class="tab active" onclick="switchTab('inspect')">🔍 Inspect</div>
+        <div class="tab" onclick="switchTab('trace')">🎯 Causal Trace</div>
+        <div class="tab" onclick="switchTab('extract')">📤 Extract</div>
+        <div class="tab" onclick="switchTab('vis3d')">🌐 3-D Visualisation</div>
+    </div>
+
+    <!-- ── TAB: Inspect ──────────────────── -->
+    <div id="tab-inspect">
+        <div class="panel">
+            <h3>🔍 Forward Pass &amp; Activations</h3>
+            <input type="text" id="inspect-text" value="The capital of Germany is"
+                   placeholder="Enter text …"/>
+            <button onclick="runForward()">Analyse</button>
+        </div>
+        <div id="inspect-results" style="display:none">
+            <div class="panel"><h3>🔤 Tokens</h3><div id="token-display" class="token-display"></div></div>
+            <div class="panel"><h3>🎯 Top Predictions</h3>
+                <table class="predictions-table" id="predictions-table"><thead><tr><th>Token</th><th>Probability</th><th></th></tr></thead><tbody></tbody></table>
+            </div>
+            <div class="panel"><h3>📊 Layer Activations</h3><div id="plot-container" class="plot-box"></div></div>
+        </div>
+    </div>
+
+    <!-- ── TAB: Causal Trace ─────────────── -->
+    <div id="tab-trace" style="display:none">
+        <div class="panel">
+            <h3>🎯 Causal Tracing</h3>
+            <p style="color:#888;font-size:.85em;margin-bottom:10px">
+                Identifies which layers are causally responsible for a prediction.</p>
+            <input type="text" id="trace-prompt" value="The Eiffel Tower is located in"/>
+            <button onclick="runCausalTrace()">Start Causal Trace</button>
+        </div>
+        <div id="trace-results" style="display:none">
+            <div class="panel"><h3>📊 Causal Effect per Layer</h3>
+                <div id="trace-prediction"></div><div id="trace-plot" class="plot-box"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ── TAB: Extract ──────────────────── -->
+    <div id="tab-extract" style="display:none">
+        <div class="panel">
+            <h3>📤 Extract Knowledge Sub-Cluster</h3>
+            <p style="color:#888;font-size:.85em;margin-bottom:10px">Enter domain prompts (one per line). Train an SAE first!</p>
+            <textarea id="domain-prompts" rows="8">The capital of France is
+The capital of Germany is
+The capital of Italy is
+The capital of Spain is
+The capital of Japan is
+The capital of Brazil is
+The capital of Australia is</textarea>
+            <button onclick="extractCluster()">Extract cluster</button>
+            <button class="secondary" onclick="serializeCluster()" id="btn-serialize" disabled>💾 Serialise &amp; Download</button>
+        </div>
+        <div id="extract-results" style="display:none">
+            <div class="panel"><h3>🔗 Shared Features</h3><div id="shared-features-info"></div><div id="shared-features" class="feature-list"></div></div>
+            <div class="panel"><h3>📊 SVD of Sub-Cluster</h3><div id="svd-plot" class="plot-box"></div></div>
+        </div>
+    </div>
+
+    <!-- ── TAB: 3-D Visualisation ────────── -->
+    <div id="tab-vis3d" style="display:none">
+        <div class="panel">
+            <h3>🌐 3-D Visualisation Controls</h3>
+            <input type="text" id="vis-text" value="The capital of Germany is"
+                   placeholder="Text for visualisation …"/>
+            <label style="color:#888;font-size:.85em">Layer for surface / feature space:</label>
+            <input type="text" id="vis-layer" value="6"/>
+            <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px">
+                <button onclick="visLayerTrajectory()">Layer Trajectory</button>
+                <button onclick="visActivationLandscape()">Activation Surface</button>
+                <button onclick="visFeatureSpace()">Feature Space</button>
+                <button onclick="visMultiPrompt()">Multi-Prompt Cluster</button>
+            </div>
+        </div>
+        <div class="vis-grid">
+            <div class="panel" id="vis-panel-trajectory" style="display:none">
+                <h3>🛤️ Layer Trajectory (PCA 3-D)</h3>
+                <p class="explained" id="traj-explained"></p>
+                <div id="vis-trajectory" class="plot-box"></div>
+            </div>
+            <div class="panel" id="vis-panel-surface" style="display:none">
+                <h3>🏔️ Activation Landscape</h3>
+                <p class="explained" id="surf-stats"></p>
+                <div id="vis-surface" class="plot-box"></div>
+            </div>
+            <div class="panel" id="vis-panel-features" style="display:none">
+                <h3>✨ SAE Feature Space (PCA 3-D)</h3>
+                <p class="explained" id="feat-explained"></p>
+                <div id="vis-features" class="plot-box"></div>
+            </div>
+            <div class="panel" id="vis-panel-multi" style="display:none">
+                <h3>🗂️ Multi-Prompt Clusters (PCA 3-D)</h3>
+                <p class="explained" id="multi-explained"></p>
+                <div id="vis-multi" class="plot-box"></div>
+            </div>
+        </div>
+    </div>
+</div>
+</div>
+
+<script>
+// ── State ──────────────────────────────────
+let currentFeatures = [];
+const PLOTLY_DARK = {
+    paper_bgcolor:'#151530', plot_bgcolor:'#151530',
+    font:{color:'#888'}, margin:{t:30,b:40,l:40,r:20}
+};
+
+function populateLayerSelects(nLayers) {
+    const selects = [
+        document.getElementById('sae-layer'),
+        document.getElementById('vis-layer')
+    ];
+    selects.forEach(sel => {
+        sel.innerHTML = '';                          // clear old options
+        for (let i = 0; i < nLayers; i++) {
+            const opt = document.createElement('option');
+            opt.value = i;
+            opt.textContent = `Layer ${i}`;
+            sel.appendChild(opt);
+        }
+        // sensible default: ~ halfway through the network
+        sel.value = Math.min(6, nLayers - 1);
+    });
+}
+
+// ── Utilities ──────────────────────────────
+function setStatus(msg,type='ok'){
+    const el=document.getElementById('status');
+    el.className=`status-bar status-${type}`;
+    // Wrap the line causing the error in {% raw %} and {% endraw %}
+    {% raw %}
+    el.textContent=`${{ok:'✓',error:'✗',loading:'⏳'}[type]||''} ${msg}`;
+    {% endraw %}
+}
+function log(msg){
+    const el=document.getElementById('log');
+    el.textContent+=`[${new Date().toLocaleTimeString()}] ${msg}\n`;
+    el.scrollTop=el.scrollHeight;
+}
+function switchTab(name){
+    document.querySelectorAll('.tabs .tab').forEach(t=>t.classList.remove('active'));
+    document.querySelectorAll('[id^="tab-"]').forEach(t=>t.style.display='none');
+    document.getElementById(`tab-${name}`).style.display='block';
+    event.target.classList.add('active');
+}
+async function api(endpoint,data=null){
+    const opts=data?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)}:{};
+    const res=await fetch(`/api/${endpoint}`,opts);
+    return res.json();
+}
+
+// ── Load Model ─────────────────────────────
+async function loadModel(){
+	const btn=document.getElementById('btn-load');
+	const model=document.getElementById('model-select').value;
+	btn.disabled=true; setStatus(`Loading ${model} …`,'loading'); log(`Load: ${model}`);
+	try{
+		const res=await api('load_model',{model_name:model});
+		if(res.status!=='ok') throw new Error(res.message);
+		const i=res.info;
+		document.getElementById('model-info').style.display='block';
+		document.getElementById('model-info').innerHTML=`
+	    <span class="label">Model:</span> <span class="value">${i.model_name}</span><br>
+	    <span class="label">Params:</span> <span class="value">${i.total_params_human}</span><br>
+	    <span class="label">Layers:</span> <span class="value">${i.n_layers}</span><br>
+	    <span class="label">d_model:</span> <span class="value">${i.d_model}</span><br>
+	    <span class="label">Heads:</span> <span class="value">${i.n_heads}</span><br>
+	    <span class="label">Family:</span> <span class="value">${i.family}</span><br>
+	    <span class="label">Device:</span> <span class="value">${i.device}</span>`;
+		populateLayerSelects(i.n_layers);
+		setStatus(`${i.model_name} loaded (${i.total_params_human})`,'ok');
+		log(`Loaded: ${i.total_params_human}`);
+	}catch(e){setStatus(`Error: ${e.message}`,'error');log(`ERROR: ${e.message}`);}
+	btn.disabled=false;
+}
+
+// ── Forward Pass ───────────────────────────
+async function runForward(){
+    const text=document.getElementById('inspect-text').value;
+    setStatus('Analysing…','loading'); log(`Forward: "${text}"`);
+    try{
+        const res=await api('forward',{text});
+        if(res.status!=='ok') throw new Error(res.message);
+        document.getElementById('token-display').innerHTML=
+            res.tokens.map(t=>`<span class="token">${t.replace(/ /g,'·')}</span>`).join('');
+        document.querySelector('#predictions-table tbody').innerHTML=
+            res.predictions.map(p=>`<tr><td><b>${p.token}</b></td><td>${(p.prob*100).toFixed(1)}%</td><td><div class="prob-bar" style="width:${p.prob*300}px"></div></td></tr>`).join('');
+        const layers=Object.keys(res.activations).sort();
+        Plotly.newPlot('plot-container',[
+            {x:layers.map(k=>k.replace('layer_','L').replace('_mlp',' MLP').replace('_attn',' Attn')),
+             y:layers.map(k=>res.activations[k].l2_norm),type:'bar',name:'L2 Norm',marker:{color:'#6c63ff'}},
+            {x:layers.map(k=>k.replace('layer_','L').replace('_mlp',' MLP').replace('_attn',' Attn')),
+             y:layers.map(k=>res.activations[k].std),type:'bar',name:'Std Dev',marker:{color:'#ff63c3'}}
+        ],{...PLOTLY_DARK,barmode:'group',xaxis:{gridcolor:'#2a2a4a'},yaxis:{gridcolor:'#2a2a4a'}});
+        document.getElementById('inspect-results').style.display='block';
+        setStatus(`Done — top: "${res.predictions[0].token}"`,'ok');
+    }catch(e){setStatus(`Error: ${e.message}`,'error');log(`ERROR: ${e.message}`);}
+}
+
+// ── Causal Trace ───────────────────────────
+async function runCausalTrace(){
+    const prompt=document.getElementById('trace-prompt').value;
+    setStatus('Causal tracing…','loading'); log(`Trace: "${prompt}"`);
+    try{
+        const res=await api('causal_trace',{prompt});
+        if(res.status!=='ok') throw new Error(res.message);
+        const r=res.result;
+        document.getElementById('trace-prediction').innerHTML=
+            `<p style="margin:10px 0">Prediction: <b style="color:#6c63ff">"${r.predicted_token}"</b> (${(r.predicted_prob*100).toFixed(1)}%)</p>`;
+        const layers=Object.keys(r.causal_effects).map(Number).sort((a,b)=>a-b);
+        const effects=layers.map(l=>r.causal_effects[l]);
+        Plotly.newPlot('trace-plot',[{
+            x:layers.map(l=>`Layer ${l}`),y:effects,type:'bar',
+            marker:{color:effects.map(e=>{const t=Math.min(e/Math.max(...effects),1);return `rgba(108,99,255,${.3+t*.7})`;})}
+        }],{...PLOTLY_DARK,xaxis:{gridcolor:'#2a2a4a',title:'Layer'},yaxis:{gridcolor:'#2a2a4a',title:'Recovery Prob'}});
+        document.getElementById('trace-results').style.display='block';
+        setStatus(`Trace done — strongest: Layer ${layers[effects.indexOf(Math.max(...effects))]}`,'ok');
+    }catch(e){setStatus(`Error: ${e.message}`,'error');log(`ERROR: ${e.message}`);}
+}
+
+// ── SAE Training ───────────────────────────
+async function trainSAE(){
+    const btn=document.getElementById('btn-sae'); btn.disabled=true;
+    const layer=parseInt(document.getElementById('sae-layer').value);
+    const nf=parseInt(document.getElementById('sae-features').value);
+    const ns=parseInt(document.getElementById('sae-steps').value);
+    setStatus(`Training SAE L${layer}…`,'loading'); log(`SAE: L=${layer} F=${nf} S=${ns}`);
+    try{
+        const res=await api('train_sae',{layer_idx:layer,n_features:nf,n_steps:ns});
+        if(res.status!=='ok') throw new Error(res.message);
+        setStatus(res.message,'ok'); log(`SAE done. Loss: ${res.final_loss.toFixed(4)}`);
+    }catch(e){setStatus(`Error: ${e.message}`,'error');log(`ERROR: ${e.message}`);}
+    btn.disabled=false;
+}
+
+// ── Cluster Extraction ─────────────────────
+async function extractCluster(){
+    const prompts=document.getElementById('domain-prompts').value.split('\n').map(s=>s.trim()).filter(Boolean);
+    const layer=parseInt(document.getElementById('sae-layer').value);
+    setStatus('Extracting cluster…','loading'); log(`Extract: ${prompts.length} prompts, L${layer}`);
+    try{
+        const res=await api('extract_cluster',{layer_idx:layer,domain_prompts:prompts});
+        if(res.status!=='ok') throw new Error(res.message);
+        document.getElementById('shared-features-info').innerHTML=
+            `<p style="margin:10px 0;color:#888">${res.n_shared_features} shared features (of ${res.n_total_features} total). Effective rank: <b style="color:#6c63ff">${res.svd_info.effective_rank}</b></p>`;
+        currentFeatures=res.shared_features.map(f=>f.feature_idx);
+        const mx=Math.max(...res.shared_features.map(f=>f.mean_strength),1e-9);
+        document.getElementById('shared-features').innerHTML=res.shared_features.map(f=>`
+            <div class="feature-item"><div class="idx">#${f.feature_idx}</div>
+            <div class="bar-container"><div class="feature-bar" style="width:${(f.mean_strength/mx)*100}%"></div></div>
+            <div style="width:80px;text-align:right;color:#6c63ff">${f.mean_strength.toFixed(3)}</div>
+            <div style="width:60px;text-align:right;color:#888">${(f.activation_rate*100).toFixed(0)}%</div></div>`).join('');
+        if(res.svd_info.singular_values.length)
+            Plotly.newPlot('svd-plot',[{y:res.svd_info.singular_values,type:'bar',marker:{color:'#ff63c3'}}],
+                {...PLOTLY_DARK,xaxis:{gridcolor:'#2a2a4a',title:'Component'},yaxis:{gridcolor:'#2a2a4a',title:'Singular Value'}});
+        document.getElementById('extract-results').style.display='block';
+        document.getElementById('btn-serialize').disabled=false;
+        setStatus(`${res.n_shared_features} cluster features extracted`,'ok');
+    }catch(e){setStatus(`Error: ${e.message}`,'error');log(`ERROR: ${e.message}`);}
+}
+
+// ── Serialisation ──────────────────────────
+async function serializeCluster(){
+    const layer=parseInt(document.getElementById('sae-layer').value);
+    setStatus('Serialising…','loading');
+    try{
+        const res=await api('serialize_cluster',{layer_idx:layer,feature_indices:currentFeatures});
+        if(res.status!=='ok') throw new Error(res.message);
+        const blob=new Blob([Uint8Array.from(atob(res.data_b64),c=>c.charCodeAt(0))],{type:'application/json'});
+        const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=res.filename;a.click();
+        setStatus(`Saved: ${res.filename} (${res.size_kb.toFixed(1)} KB)`,'ok');
+    }catch(e){setStatus(`Error: ${e.message}`,'error');}
+}
+
+// ════════════════════════════════════════════
+//  3-D VISUALISATION FUNCTIONS
+// ════════════════════════════════════════════
+
+async function visLayerTrajectory(){
+    const text=document.getElementById('vis-text').value;
+    setStatus('Computing layer trajectory…','loading'); log('3D: layer trajectory');
+    try{
+        const res=await api('vis3d/layer_trajectory',{text});
+        if(res.status!=='ok') throw new Error(res.message);
+        const pts=res.points;
+        Plotly.newPlot('vis-trajectory',[
+            {x:pts.map(p=>p.x),y:pts.map(p=>p.y),z:pts.map(p=>p.z),
+             mode:'lines+markers',type:'scatter3d',
+             marker:{size:6,color:pts.map(p=>p.layer),colorscale:'Viridis',showscale:true,
+                     colorbar:{title:'Layer',tickfont:{color:'#888'},titlefont:{color:'#888'}}},
+             line:{color:'#6c63ff',width:3},
+             text:pts.map(p=>`Layer ${p.layer}<br>norm=${p.norm.toFixed(2)}`),
+             hoverinfo:'text'}
+        ],{...PLOTLY_DARK,
+           scene:{xaxis:{title:'PC1',gridcolor:'#2a2a4a',color:'#666'},
+                  yaxis:{title:'PC2',gridcolor:'#2a2a4a',color:'#666'},
+                  zaxis:{title:'PC3',gridcolor:'#2a2a4a',color:'#666'},
+                  bgcolor:'#151530'}});
+        document.getElementById('traj-explained').textContent=
+            `Explained variance: ${res.explained_variance.map(v=>(v*100).toFixed(1)+'%').join(' / ')}`;
+        document.getElementById('vis-panel-trajectory').style.display='block';
+        setStatus('Layer trajectory ready','ok');
+    }catch(e){setStatus(`Error: ${e.message}`,'error');log(`ERROR: ${e.message}`);}
+}
+
+async function visActivationLandscape(){
+    const text=document.getElementById('vis-text').value;
+    const layer=parseInt(document.getElementById('vis-layer').value);
+    setStatus('Computing activation landscape…','loading'); log(`3D: surface L${layer}`);
+    try{
+        const res=await api('vis3d/activation_landscape',{text,layer_idx:layer});
+        if(res.status!=='ok') throw new Error(res.message);
+        Plotly.newPlot('vis-surface',[{
+            z:res.z, type:'surface',
+            colorscale:'Portland', showscale:true,
+            colorbar:{tickfont:{color:'#888'}}
+        }],{...PLOTLY_DARK,
+            scene:{xaxis:{title:'Neuron (row)',gridcolor:'#2a2a4a',color:'#666'},
+                   yaxis:{title:'Neuron (col)',gridcolor:'#2a2a4a',color:'#666'},
+                   zaxis:{title:'Activation',gridcolor:'#2a2a4a',color:'#666'},
+                   bgcolor:'#151530'},
+            title:{text:`Layer ${res.layer_idx} — d_model=${res.d_model}`,font:{color:'#6c63ff',size:14}}});
+        document.getElementById('surf-stats').textContent=
+            `mean=${res.stats.mean.toFixed(4)}  std=${res.stats.std.toFixed(4)}  range=[${res.stats.min.toFixed(3)}, ${res.stats.max.toFixed(3)}]`;
+        document.getElementById('vis-panel-surface').style.display='block';
+        setStatus('Activation landscape ready','ok');
+    }catch(e){setStatus(`Error: ${e.message}`,'error');log(`ERROR: ${e.message}`);}
+}
+
+async function visFeatureSpace(){
+    const text=document.getElementById('vis-text').value;
+    const layer=parseInt(document.getElementById('vis-layer').value);
+    setStatus('Computing feature space…','loading'); log(`3D: features L${layer}`);
+    try{
+        const res=await api('vis3d/feature_space',{text,layer_idx:layer});
+        if(res.status!=='ok') throw new Error(res.message);
+        const pts=res.points;
+        const maxS=Math.max(...pts.map(p=>p.strength),1e-9);
+        Plotly.newPlot('vis-features',[{
+            x:pts.map(p=>p.x),y:pts.map(p=>p.y),z:pts.map(p=>p.z),
+            mode:'markers',type:'scatter3d',
+            marker:{size:pts.map(p=>3+Math.min(p.strength/maxS*10,12)),
+                    color:pts.map(p=>p.strength),colorscale:'Hot',showscale:true,
+                    colorbar:{title:'Activation',tickfont:{color:'#888'},titlefont:{color:'#888'}},
+                    opacity:0.7},
+            text:pts.map(p=>`Feature #${p.feature_idx}<br>strength=${p.strength.toFixed(4)}`),
+            hoverinfo:'text'
+        }],{...PLOTLY_DARK,
+            scene:{xaxis:{title:'PC1',gridcolor:'#2a2a4a',color:'#666'},
+                   yaxis:{title:'PC2',gridcolor:'#2a2a4a',color:'#666'},
+                   zaxis:{title:'PC3',gridcolor:'#2a2a4a',color:'#666'},
+                   bgcolor:'#151530'}});
+        document.getElementById('feat-explained').textContent=
+            `Explained variance: ${res.explained_variance.map(v=>(v*100).toFixed(1)+'%').join(' / ')} — ${pts.length} features shown`;
+        document.getElementById('vis-panel-features').style.display='block';
+        setStatus('Feature space ready','ok');
+    }catch(e){setStatus(`Error: ${e.message}`,'error');log(`ERROR: ${e.message}`);}
+}
+
+async function visMultiPrompt(){
+    const prompts=document.getElementById('domain-prompts').value.split('\n').map(s=>s.trim()).filter(Boolean);
+    const layer=parseInt(document.getElementById('vis-layer').value);
+    if(prompts.length<3){setStatus('Need ≥3 prompts (use Extract tab textarea)','error');return;}
+    setStatus('Computing multi-prompt clusters…','loading'); log(`3D: multi-prompt L${layer}`);
+    try{
+        const res=await api('vis3d/multi_prompt',{prompts,layer_idx:layer});
+        if(res.status!=='ok') throw new Error(res.message);
+        const pts=res.points;
+        Plotly.newPlot('vis-multi',[{
+            x:pts.map(p=>p.x),y:pts.map(p=>p.y),z:pts.map(p=>p.z),
+            mode:'markers+text',type:'scatter3d',
+            marker:{size:8,color:'#6c63ff',opacity:.9},
+            text:pts.map(p=>p.label),textposition:'top center',
+            textfont:{size:9,color:'#ccc'},
+            hoverinfo:'text'
+        }],{...PLOTLY_DARK,
+            scene:{xaxis:{title:'PC1',gridcolor:'#2a2a4a',color:'#666'},
+                   yaxis:{title:'PC2',gridcolor:'#2a2a4a',color:'#666'},
+                   zaxis:{title:'PC3',gridcolor:'#2a2a4a',color:'#666'},
+                   bgcolor:'#151530'}});
+        document.getElementById('multi-explained').textContent=
+            `Explained variance: ${res.explained_variance.map(v=>(v*100).toFixed(1)+'%').join(' / ')} — ${pts.length} prompts`;
+        document.getElementById('vis-panel-multi').style.display='block';
+        setStatus('Multi-prompt clusters ready','ok');
+    }catch(e){setStatus(`Error: ${e.message}`,'error');log(`ERROR: ${e.message}`);}
+}
+</script>
+</body>
+</html>
