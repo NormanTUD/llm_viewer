@@ -175,8 +175,8 @@
 <div id="tab-patterns" class="tab-content">
     <h2>🔎 Real Embedding Pattern Discovery</h2>
     <p class="hint">
-        Find <b>real tokens</b> in the embedding space that form geometric patterns.
-        E.g., discover that year tokens sit on a helix, or numbers form a spiral.
+        Finds <b>real tokens</b> that lie ON a geometric curve/shape in embedding space.
+        Tokens must actually trace the pattern — not just be near it.
     </p>
 
     <div class="controls-row">
@@ -192,7 +192,6 @@
             <option value="figure_eight">Figure-eight</option>
             <option value="torus_knot">Torus knot</option>
         </select>
-
         <label>Filter tokens:</label>
         <select id="pattern-filter">
             <option value="all">All tokens (sampled)</option>
@@ -204,35 +203,28 @@
             <option value="colors">Color words</option>
             <option value="regex">Custom regex...</option>
         </select>
-
-        <input type="text" id="pattern-regex" placeholder="Custom regex (if filter=regex)"
-               style="display:none; width:150px;">
+        <input type="text" id="pattern-regex" placeholder="regex" style="display:none; width:140px;">
     </div>
 
     <div class="controls-row">
-        <label>Pattern points:</label>
-        <input type="number" id="pattern-n-points" value="40" min="10" max="200" style="width:70px;">
+        <label>Strictness:</label>
+        <input type="range" id="pattern-strictness" min="0" max="1" step="0.05" value="0.6"
+               style="width:150px;">
+        <span id="strictness-label" style="color:#a5f3fc; min-width:30px;">0.6</span>
+        <span class="hint" style="margin:0;">(← loose / strict →)</span>
 
-        <label>Sample size:</label>
-        <input type="number" id="pattern-sample-size" value="10000" min="100" max="50000" style="width:90px;">
-
-        <label>Search:</label>
-        <select id="pattern-search-method">
-            <option value="both">ICP + Greedy (best)</option>
-            <option value="icp">ICP only</option>
-            <option value="greedy">Greedy curve only</option>
-        </select>
-
-        <label>
-            <input type="checkbox" id="pattern-search-subspaces"> Search subspaces
-        </label>
+        <label>Points:</label>
+        <input type="number" id="pattern-n-points" value="40" min="10" max="200" style="width:65px;">
+        <label>Sample:</label>
+        <input type="number" id="pattern-sample-size" value="10000" min="100" max="50000" style="width:85px;">
+        <label><input type="checkbox" id="pattern-search-subspaces"> Search subspaces</label>
     </div>
 
     <div class="controls-row">
-        <button id="btn-preview-pattern" class="btn-secondary">👁 Preview Pattern</button>
-        <button id="btn-preview-filter" class="btn-secondary">📋 Preview Filter</button>
+        <button id="btn-preview-pattern" class="btn-secondary">👁 Preview</button>
+        <button id="btn-preview-filter" class="btn-secondary">📋 Filter</button>
         <button id="btn-search-pattern" class="btn-primary">🔎 Find Pattern in Embeddings</button>
-        <button id="btn-scan-all-patterns" class="btn-secondary">📊 Scan All Patterns</button>
+        <button id="btn-scan-all-patterns" class="btn-secondary">📊 Scan All</button>
     </div>
 
     <div id="filter-preview" class="hint" style="margin:8px 0;"></div>
@@ -240,14 +232,18 @@
     <div class="viz-container">
         <div id="pattern-main-plot" class="plot-3d"></div>
         <div id="pattern-info" class="info-panel">
-            <h3>Pattern Discovery</h3>
-            <p>Select a pattern and filter, then click <b>"Find Pattern in Embeddings"</b>
-               to search the real embedding space.</p>
-            <p>The tool will find actual tokens whose positions form that shape.</p>
+            <h3>How It Works (v3)</h3>
+            <p>Unlike v2 which matched tokens to template <i>points</i>,
+               v3 fits a <b>continuous curve</b> and selects only tokens
+               that actually <b>lie on it</b>.</p>
             <hr style="border-color:#30363d; margin:10px 0">
-            <p><b>Helix + Years:</b> Try "helix" pattern with "years" filter.</p>
-            <p><b>Line + Numbers:</b> Try "line" pattern with "numbers" filter.</p>
-            <p><b>Clusters + Words:</b> Try "clusters" with "words" filter.</p>
+            <p><b>1.</b> Aligns curve to token cloud (multi-start ICP)</p>
+            <p><b>2.</b> Measures distance from every token to the <i>continuous polyline</i></p>
+            <p><b>3.</b> Keeps only tokens within a tight threshold (inliers)</p>
+            <p><b>4.</b> Iteratively refines: re-aligns curve to inliers</p>
+            <p><b>5.</b> Orders tokens along the curve, prunes isolated ones</p>
+            <hr style="border-color:#30363d; margin:10px 0">
+            <p><b>Try:</b> Helix + Years, Line + Numbers, Circle + Months</p>
         </div>
     </div>
 

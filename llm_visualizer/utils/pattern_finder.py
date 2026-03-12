@@ -1,49 +1,45 @@
 """
-Pattern Finder v2 — FAST, LIVE progressive search.
+Pattern Finder v3 — CURVE-FITTING with inlier selection.
 
-Key changes from v1:
-  1. All search functions are GENERATORS that yield intermediate results
-     so the UI can show progressive updates in real time.
-  2. Vocabulary filtering is vectorized (no per-token Python loop).
-  3. KDTree + projection are pre-cached.
-  4. Coarse-to-fine ICP: quick coarse pass → refine top candidates.
-  5. Batch matrix operations throughout.
+Key insight from v2's failure: ICP matches 1-to-1 with template POINTS,
+so matched tokens can be far from the actual curve. 
+
+v3 approach:
+  1. Align a continuous curve to the token cloud (multi-start ICP)
+  2. Compute distance from EVERY token to the continuous POLYLINE
+  3. Select only tokens within a tight distance threshold (INLIERS)
+  4. Iteratively refine: re-align curve to inliers, recompute, repeat
+  5. Order inliers by their parameter along the curve
+  6. Prune isolated tokens that don't have curve-neighbors
+
+This gives tokens that truly LIE ON the manifold.
 """
 
 import numpy as np
 import time
 from typing import Dict, List, Optional, Tuple, Generator
 from scipy.spatial import KDTree
-from scipy.spatial.distance import cdist
-from scipy.optimize import linear_sum_assignment
 from sklearn.decomposition import PCA
-import re
 
 from utils.model_loader import load_tokenizer
 from utils.embedding_utils import get_token_embedding_matrix
 
 
 # ═══════════════════════════════════════════════════════════════════
-# CACHING — precompute expensive things once
+# CACHING
 # ═══════════════════════════════════════════════════════════════════
 
-_filter_cache = {}        # (model_key, filter_type) -> (token_ids, tokens, embeddings)
-_projection_cache = {}    # (model_key, filter_type, proj_method) -> emb_3d
-_kdtree_cache = {}        # same key -> KDTree on the 3D projection
-
-
-def _cache_key(model_key, filter_type, proj="pca"):
-    return (model_key, filter_type, proj)
+_filter_cache = {}
+_projection_cache = {}
 
 
 def clear_caches():
     _filter_cache.clear()
     _projection_cache.clear()
-    _kdtree_cache.clear()
 
 
 # ═══════════════════════════════════════════════════════════════════
-# PATTERN GENERATORS (unchanged, compact)
+# PATTERN GENERATORS
 # ═══════════════════════════════════════════════════════════════════
 
 def generate_spiral(n_points=100, **kw):
@@ -68,7 +64,8 @@ def generate_sphere(n_points=200, **kw):
     idx = np.arange(n_points)
     theta = 2 * np.pi * idx / golden
     phi = np.arccos(1 - 2 * (idx + 0.5) / n_points)
-    return np.stack([np.sin(phi) * np.cos(theta), np.sin(phi) * np.sin(theta), np.cos(phi)], axis=1)
+    return np.stack([np.sin(phi) * np.cos(theta),
+                     np.sin(phi) * np.sin(theta), np.cos(phi)], axis=1)
 
 def generate_grid(n_points=100, **kw):
     n = int(np.sqrt(n_points))
@@ -77,8 +74,7 @@ def generate_grid(n_points=100, **kw):
 
 def generate_clusters(n_points=100, **kw):
     rng = np.random.RandomState(42)
-    nc = 5
-    ppg = max(1, n_points // nc)
+    nc, ppg = 5, max(1, n_points // 5)
     pts = [rng.randn(3) * 2 + 0.15 * rng.randn(ppg, 3) for _ in range(nc)]
     return np.vstack(pts)[:n_points]
 
@@ -98,184 +94,378 @@ PATTERN_GENERATORS = {
     "torus_knot": generate_torus_knot,
 }
 
-
-# ═══════════════════════════════════════════════════════════════════
-# FAST VOCABULARY FILTERING — vectorized
-# ═══════════════════════════════════════════════════════════════════
-
-def filter_vocab_tokens(model_key: str, filter_type: str = "all",
-                         custom_regex: str = None,
-                         max_tokens: int = 30000) -> Tuple[List[int], List[str]]:
-    """
-    Fast filtered token retrieval. Returns (token_ids, token_strings).
-    Caches results for repeated calls.
-    """
-    cache_key = (model_key, filter_type, custom_regex or "", max_tokens)
-    if cache_key in _filter_cache:
-        return _filter_cache[cache_key]
-
-    tokenizer = load_tokenizer(model_key)
-    vocab_size = tokenizer.vocab_size
-
-    # Decode entire vocab in one batch (much faster than per-token)
-    all_tokens = [tokenizer.decode([i]) for i in range(vocab_size)]
-
-    ids = []
-    toks = []
-
-    if filter_type == "all":
-        # Random sample for speed
-        rng = np.random.RandomState(42)
-        sample = rng.choice(vocab_size, size=min(max_tokens, vocab_size), replace=False)
-        sample.sort()
-        ids = sample.tolist()
-        toks = [all_tokens[i] for i in ids]
-    else:
-        # Vectorized-ish filtering
-        for i, tok in enumerate(all_tokens):
-            s = tok.strip().lower()
-            keep = False
-
-            if filter_type == "numbers":
-                keep = s.lstrip("-").replace(".", "", 1).isdigit()
-            elif filter_type == "years":
-                keep = s.isdigit() and 1000 <= int(s) <= 2100
-            elif filter_type == "words":
-                keep = s.isalpha() and len(s) >= 2
-            elif filter_type == "letters":
-                keep = s.isalpha() and len(s) == 1
-            elif filter_type == "months":
-                keep = s in {"january","february","march","april","may","june",
-                             "july","august","september","october","november","december",
-                             "jan","feb","mar","apr","jun","jul","aug","sep","oct","nov","dec"}
-            elif filter_type == "colors":
-                keep = s in {"red","orange","yellow","green","blue","purple","violet",
-                             "pink","brown","black","white","gray","grey","cyan",
-                             "magenta","indigo","teal","crimson","scarlet","gold"}
-            elif filter_type == "regex" and custom_regex:
-                try:
-                    keep = bool(re.search(custom_regex, tok))
-                except re.error:
-                    pass
-
-            if keep:
-                ids.append(i)
-                toks.append(tok)
-                if len(ids) >= max_tokens:
-                    break
-
-    _filter_cache[cache_key] = (ids, toks)
-    return ids, toks
-
-
-def get_filtered_embeddings_3d(model_key: str, filter_type: str,
-                                custom_regex: str = None,
-                                max_tokens: int = 30000,
-                                projection: str = "pca"):
-    """
-    Get 3D projected embeddings for a filtered token set. Cached.
-    Returns (token_ids, tokens, embeddings_highD, emb_3d, kdtree).
-    """
-    ck = _cache_key(model_key, filter_type + (custom_regex or ""), projection)
-
-    if ck in _projection_cache:
-        return _projection_cache[ck]
-
-    ids, toks = filter_vocab_tokens(model_key, filter_type, custom_regex, max_tokens)
-    emb_matrix = get_token_embedding_matrix(model_key)
-    emb = emb_matrix[ids]
-
-    # PCA to 3D (fast for any size)
-    if emb.shape[0] < 3:
-        emb_3d = np.zeros((emb.shape[0], 3))
-    else:
-        n_comp = min(3, emb.shape[0], emb.shape[1])
-        pca = PCA(n_components=n_comp)
-        emb_3d = pca.fit_transform(emb)
-        if n_comp < 3:
-            emb_3d = np.hstack([emb_3d, np.zeros((emb_3d.shape[0], 3 - n_comp))])
-
-    tree = KDTree(emb_3d)
-
-    result = (ids, toks, emb, emb_3d, tree)
-    _projection_cache[ck] = result
-    _kdtree_cache[ck] = tree
-    return result
+# Patterns that are curves (use polyline distance) vs point clouds
+CURVE_PATTERNS = {"spiral", "circle", "line", "helix", "figure_eight", "torus_knot"}
 
 
 # ═══════════════════════════════════════════════════════════════════
-# NORMALIZATION
+# CORE GEOMETRY: Polyline distance (the key improvement)
+# ═══════════════════════════════════════════════════════════════════
+
+def polyline_dists(points, curve):
+    """
+    For each point, compute distance to the NEAREST point on the
+    continuous polyline defined by `curve`.
+
+    This is the KEY DIFFERENCE from v2: we measure distance to the
+    CURVE, not to discrete template points.
+
+    points: (N, D)
+    curve:  (M, D) — vertices of polyline
+
+    Returns:
+      dists:  (N,) — distance from each point to nearest curve segment
+      params: (N,) — parameter along curve [0, M-1] of nearest point
+      projs:  (N, D) — the actual nearest point on the curve (projection)
+    """
+    N = points.shape[0]
+    M = curve.shape[0]
+    D = points.shape[1]
+
+    best_dists = np.full(N, np.inf)
+    best_params = np.zeros(N)
+    best_projs = np.zeros((N, D))
+
+    for i in range(M - 1):
+        a = curve[i]                           # (D,)
+        ab = curve[i + 1] - a                  # (D,)
+        ab_sq = np.dot(ab, ab) + 1e-12
+
+        ap = points - a                        # (N, D)
+        t = np.clip((ap @ ab) / ab_sq, 0, 1)  # (N,)
+        proj = a + np.outer(t, ab)             # (N, D)
+        d = np.linalg.norm(points - proj, axis=1)  # (N,)
+
+        mask = d < best_dists
+        best_dists[mask] = d[mask]
+        best_params[mask] = i + t[mask]
+        best_projs[mask] = proj[mask]
+
+    return best_dists, best_params, best_projs
+
+
+def point_cloud_dists(points, template):
+    """
+    For non-curve patterns (sphere, grid, clusters):
+    distance from each point to nearest TEMPLATE POINT.
+
+    Returns: dists (N,), nearest_idx (N,)
+    """
+    tree = KDTree(template)
+    dists, idx = tree.query(points)
+    return dists, idx
+
+
+# ═══════════════════════════════════════════════════════════════════
+# NORMALIZATION & TRANSFORMS
 # ═══════════════════════════════════════════════════════════════════
 
 def normalize(pts):
-    """Zero-center, unit-scale. Returns (normed, mean, scale)."""
+    """Zero-center, unit-scale."""
     m = pts.mean(axis=0)
     c = pts - m
     s = np.std(c) + 1e-9
     return c / s, m, s
 
 
-def similarity(a, b):
-    """Bidirectional nearest-neighbor similarity. 0..1, higher=better."""
-    if a.shape[0] < 2 or b.shape[0] < 2:
-        return 0.0
-    an, _, _ = normalize(a)
-    bn, _, _ = normalize(b)
-    d = cdist(an, bn)
-    return float(1.0 / (1.0 + (np.mean(np.min(d, axis=1)) + np.mean(np.min(d, axis=0))) / 2))
+def derive_transform(source, aligned):
+    """
+    Derive the rigid+scale transform that maps source -> aligned.
+    Returns (R, scale, src_center, tgt_center).
+    """
+    mu_s = source.mean(axis=0)
+    mu_a = aligned.mean(axis=0)
+    sc = source - mu_s
+    ac = aligned - mu_a
+    H = sc.T @ ac
+    U, S, Vt = np.linalg.svd(H)
+    R = Vt.T @ U.T
+    if np.linalg.det(R) < 0:
+        Vt[-1] *= -1
+        R = Vt.T @ U.T
+    scale = np.sum(S) / (np.sum(sc ** 2) + 1e-9)
+    return R, scale, mu_s, mu_a
+
+
+def apply_transform(points, R, scale, src_center, tgt_center):
+    """Apply rigid+scale transform to points."""
+    return scale * ((points - src_center) @ R.T) + tgt_center
 
 
 # ═══════════════════════════════════════════════════════════════════
-# FAST ICP — batch matrix ops, no Python inner loops
+# ICP (unchanged, but now returns aligned pattern for transform derivation)
 # ═══════════════════════════════════════════════════════════════════
 
 def fast_icp(pattern, target, tree, max_iter=25):
     """
-    Single ICP run. Uses pre-built KDTree for speed.
-    Returns (matched_indices, transformed, error).
+    Standard ICP: align pattern to target using nearest neighbors.
+    Returns: (aligned_pattern, mean_error)
     """
     cur = pattern.copy()
     for _ in range(max_iter):
         dists, idx = tree.query(cur)
         matched = target[idx]
-
-        c_c = cur - cur.mean(axis=0)
-        m_c = matched - matched.mean(axis=0)
-
-        H = c_c.T @ m_c
+        mu_c = cur.mean(axis=0)
+        mu_m = matched.mean(axis=0)
+        cc = cur - mu_c
+        mc = matched - mu_m
+        H = cc.T @ mc
         U, S, Vt = np.linalg.svd(H)
         R = Vt.T @ U.T
         if np.linalg.det(R) < 0:
             Vt[-1] *= -1
             R = Vt.T @ U.T
-
-        scale = np.sum(S) / (np.sum(c_c ** 2) + 1e-9)
-        cur = scale * (c_c @ R.T) + matched.mean(axis=0)
-
-    dists, idx = tree.query(cur)
-    return idx, cur, float(np.mean(dists))
-
-
-def assign_unique(transformed, target, raw_idx, tree):
-    """Hungarian assignment for 1-to-1 matching within nearby candidates."""
-    uniq = np.unique(raw_idx)
-    if len(uniq) >= len(transformed):
-        cost = cdist(transformed, target[uniq])
-        _, col = linear_sum_assignment(cost)
-        return uniq[col]
-
-    # Expand search
-    k = min(len(transformed) * 3, target.shape[0])
-    _, expanded = tree.query(transformed.mean(axis=0), k=k)
-    if np.ndim(expanded) == 0:
-        expanded = np.array([expanded])
-    cost = cdist(transformed, target[expanded])
-    _, col = linear_sum_assignment(cost)
-    return expanded[col]
+        scale = np.sum(S) / (np.sum(cc ** 2) + 1e-9)
+        cur = scale * (cc @ R.T) + mu_m
+    dists, _ = tree.query(cur)
+    return cur, float(np.mean(dists))
 
 
 # ═══════════════════════════════════════════════════════════════════
-# PROGRESSIVE SEARCH GENERATOR — yields updates live
+# SCORING — count inliers on the actual curve
+# ═══════════════════════════════════════════════════════════════════
+
+def compute_threshold(all_dists, n_pattern_pts, strictness=0.5):
+    """
+    Adaptive distance threshold for inlier selection.
+
+    strictness 0.0 → keep ~3x pattern points (loose)
+    strictness 0.5 → keep ~2x pattern points (balanced)
+    strictness 1.0 → keep ~1x pattern points (strict)
+    """
+    n = len(all_dists)
+    target = int(n_pattern_pts * (3.0 - 2.0 * strictness))
+    target = max(n_pattern_pts // 2, min(target, n - 1))
+    sorted_d = np.sort(all_dists)
+    return float(sorted_d[target])
+
+
+def score_curve_alignment(aligned_dense_curve, all_targets_n, n_pat, strictness):
+    """
+    Score an alignment by:
+      1. Distance from ALL tokens to the continuous curve
+      2. Number of inliers within threshold
+      3. How well inliers COVER the full curve length
+      4. Mean distance of inliers (tightness)
+
+    Returns: (score, inlier_indices, dists, params, projections, threshold)
+    """
+    dists, params, projs = polyline_dists(all_targets_n, aligned_dense_curve)
+    threshold = compute_threshold(dists, n_pat, strictness)
+
+    inlier_mask = dists <= threshold
+    inlier_idx = np.where(inlier_mask)[0]
+    n_inliers = len(inlier_idx)
+
+    if n_inliers < 3:
+        return 0.0, inlier_idx, dists, params, projs, threshold
+
+    # Coverage: what fraction of curve length do inliers span?
+    max_param = len(aligned_dense_curve) - 1
+    inlier_params = params[inlier_mask]
+    coverage = (inlier_params.max() - inlier_params.min()) / (max_param + 1e-9)
+
+    # Tightness: how close are inliers to the curve?
+    mean_dist = np.mean(dists[inlier_mask])
+
+    # Uniformity: are inliers evenly spread along the curve?
+    sorted_ip = np.sort(inlier_params)
+    if len(sorted_ip) > 1:
+        gaps = np.diff(sorted_ip)
+        mean_gap = np.mean(gaps)
+        gap_cv = np.std(gaps) / (mean_gap + 1e-9)  # coefficient of variation
+        uniformity = 1.0 / (1.0 + gap_cv)
+    else:
+        uniformity = 0.0
+
+    # Combined score (higher = better)
+    score = n_inliers * coverage * uniformity / (1.0 + mean_dist * 20.0)
+
+    return score, inlier_idx, dists, params, projs, threshold
+
+
+def score_pointcloud_alignment(aligned_template, all_targets_n, n_pat, strictness):
+    """Score for non-curve patterns (sphere, grid, clusters)."""
+    dists, _ = point_cloud_dists(all_targets_n, aligned_template)
+    threshold = compute_threshold(dists, n_pat, strictness)
+    inlier_mask = dists <= threshold
+    inlier_idx = np.where(inlier_mask)[0]
+    n_inliers = len(inlier_idx)
+    if n_inliers < 3:
+        return 0.0, inlier_idx, dists, np.zeros(len(dists)), all_targets_n, threshold
+    mean_dist = np.mean(dists[inlier_mask])
+    score = n_inliers / (1.0 + mean_dist * 20.0)
+    return score, inlier_idx, dists, np.zeros(len(dists)), all_targets_n, threshold
+
+
+# ═══════════════════════════════════════════════════════════════════
+# VOCABULARY FILTERING (cached, fast)
+# ═══════════════════════════════════════════════════════════════════
+
+import re
+
+def filter_vocab_tokens(model_key, filter_type="all", custom_regex=None,
+                         max_tokens=30000):
+    """Returns (token_ids, token_strings). Cached."""
+    key = (model_key, filter_type, custom_regex or "", max_tokens)
+    if key in _filter_cache:
+        return _filter_cache[key]
+
+    tokenizer = load_tokenizer(model_key)
+    all_toks = [tokenizer.decode([i]) for i in range(tokenizer.vocab_size)]
+
+    ids, toks = [], []
+    for i, tok in enumerate(all_toks):
+        s = tok.strip().lower()
+        keep = False
+        if filter_type == "all":
+            keep = True
+        elif filter_type == "numbers":
+            keep = s.lstrip("-").replace(".", "", 1).isdigit()
+        elif filter_type == "years":
+            keep = s.isdigit() and 1000 <= int(s) <= 2100
+        elif filter_type == "words":
+            keep = s.isalpha() and len(s) >= 2
+        elif filter_type == "letters":
+            keep = s.isalpha() and len(s) == 1
+        elif filter_type == "months":
+            keep = s in {"january","february","march","april","may","june","july",
+                         "august","september","october","november","december",
+                         "jan","feb","mar","apr","jun","jul","aug","sep","oct","nov","dec"}
+        elif filter_type == "colors":
+            keep = s in {"red","orange","yellow","green","blue","purple","violet","pink",
+                         "brown","black","white","gray","grey","cyan","magenta","indigo",
+                         "teal","crimson","scarlet","gold"}
+        elif filter_type == "regex" and custom_regex:
+            try:
+                keep = bool(re.search(custom_regex, tok))
+            except re.error:
+                pass
+        if keep:
+            ids.append(i)
+            toks.append(tok)
+            if len(ids) >= max_tokens:
+                break
+
+    if filter_type == "all" and len(ids) > max_tokens:
+        rng = np.random.RandomState(42)
+        sel = rng.choice(len(ids), size=max_tokens, replace=False)
+        sel.sort()
+        ids = [ids[j] for j in sel]
+        toks = [toks[j] for j in sel]
+
+    _filter_cache[key] = (ids, toks)
+    return ids, toks
+
+
+def get_filtered_3d(model_key, filter_type, custom_regex=None,
+                     max_tokens=30000, projection="pca"):
+    """Get filtered tokens with 3D PCA projection. Cached."""
+    ck = (model_key, filter_type, custom_regex or "", max_tokens, projection)
+    if ck in _projection_cache:
+        return _projection_cache[ck]
+
+    ids, toks = filter_vocab_tokens(model_key, filter_type, custom_regex, max_tokens)
+    emb = get_token_embedding_matrix(model_key)[ids]
+
+    if emb.shape[0] >= 3:
+        pca = PCA(n_components=3)
+        emb_3d = pca.fit_transform(emb)
+    else:
+        emb_3d = np.zeros((emb.shape[0], 3))
+
+    result = (ids, toks, emb, emb_3d)
+    _projection_cache[ck] = result
+    return result
+
+
+# ═══════════════════════════════════════════════════════════════════
+# ITERATIVE REFINEMENT — the quality step
+# ═══════════════════════════════════════════════════════════════════
+
+def refine_alignment(pattern_coarse_n, pattern_dense_n,
+                      target_all_n, inlier_idx, tree_all,
+                      n_pat, strictness, is_curve, max_iter=30):
+    """
+    Refinement step:
+      1. Build KDTree of just the inlier tokens
+      2. Re-run ICP against inliers only → curve moves toward the inlier manifold
+      3. Derive transform, apply to dense curve
+      4. Re-score against ALL tokens
+      5. Return new score + inliers
+    """
+    if len(inlier_idx) < 3:
+        return None, 0, inlier_idx
+
+    inlier_pts = target_all_n[inlier_idx]
+    inlier_tree = KDTree(inlier_pts)
+
+    aligned_coarse, _ = fast_icp(pattern_coarse_n, inlier_pts, inlier_tree, max_iter)
+    R, scale, src_c, tgt_c = derive_transform(pattern_coarse_n, aligned_coarse)
+    aligned_dense = apply_transform(pattern_dense_n, R, scale, src_c, tgt_c)
+
+    if is_curve:
+        score, new_inliers, dists, params, projs, thresh = \
+            score_curve_alignment(aligned_dense, target_all_n, n_pat, strictness)
+    else:
+        score, new_inliers, dists, params, projs, thresh = \
+            score_pointcloud_alignment(aligned_dense, target_all_n, n_pat, strictness)
+
+    return aligned_dense, score, new_inliers, dists, params, projs, thresh
+
+
+# ═══════════════════════════════════════════════════════════════════
+# INLIER ORDERING & PRUNING
+# ═══════════════════════════════════════════════════════════════════
+
+def order_and_prune_inliers(inlier_idx, params, dists, max_gap_factor=3.0):
+    """
+    Order inlier tokens along the curve parameter.
+    Prune isolated tokens that have huge gaps to their neighbors.
+
+    max_gap_factor: a token is isolated if the gap to its neighbor
+    is > max_gap_factor * median_gap.
+    """
+    if len(inlier_idx) < 2:
+        return inlier_idx, params[inlier_idx], dists[inlier_idx]
+
+    inlier_params = params[inlier_idx]
+    order = np.argsort(inlier_params)
+    ordered_idx = inlier_idx[order]
+    ordered_params = inlier_params[order]
+    ordered_dists = dists[inlier_idx[order]]
+
+    if len(ordered_idx) < 4:
+        return ordered_idx, ordered_params, ordered_dists
+
+    # Compute gaps
+    gaps = np.diff(ordered_params)
+    median_gap = np.median(gaps)
+    max_gap = median_gap * max_gap_factor
+
+    # Find the longest contiguous run without huge gaps
+    runs = []
+    run_start = 0
+    for i, g in enumerate(gaps):
+        if g > max_gap:
+            if i - run_start >= 2:
+                runs.append((run_start, i + 1))
+            run_start = i + 1
+    if len(ordered_idx) - run_start >= 2:
+        runs.append((run_start, len(ordered_idx)))
+
+    if not runs:
+        return ordered_idx, ordered_params, ordered_dists
+
+    # Pick longest run
+    best_run = max(runs, key=lambda r: r[1] - r[0])
+    s, e = best_run
+
+    return ordered_idx[s:e], ordered_params[s:e], ordered_dists[s:e]
+
+
+# ═══════════════════════════════════════════════════════════════════
+# PROGRESSIVE SEARCH GENERATOR
 # ═══════════════════════════════════════════════════════════════════
 
 def progressive_search(
@@ -287,60 +477,62 @@ def progressive_search(
     sample_size: int = 10000,
     projection: str = "pca",
     search_subspaces: bool = False,
-    # For layer-based search:
+    strictness: float = 0.5,
+    # For layer search:
     layer_hidden_states: np.ndarray = None,
     layer_tokens: List[str] = None,
 ) -> Generator[Dict, None, None]:
     """
-    GENERATOR that yields progressive results as the search runs.
-
-    Each yield is a dict with:
-      - status: "progress" | "best_update" | "done" | "error"
-      - For "progress": trial_num, total_trials, current_error
-      - For "best_update": full match data (tokens, positions, etc.)
-      - For "done": final result
+    Generator that yields live updates as the search runs.
     """
     t0 = time.time()
+    is_curve = pattern_name in CURVE_PATTERNS
 
-    # ── 1. Get data ───────────────────────────────────
+    # ── 1. Load data ──────────────────────────────────
     yield {"status": "progress", "phase": "loading", "message": "Loading embeddings..."}
 
     if layer_hidden_states is not None:
-        # Searching within a specific layer's hidden states
         emb_hd = layer_hidden_states
         token_ids = list(range(emb_hd.shape[0]))
         tokens = layer_tokens or [f"pos_{i}" for i in token_ids]
         if emb_hd.shape[0] >= 3:
-            pca = PCA(n_components=3)
-            emb_3d = pca.fit_transform(emb_hd)
+            emb_3d = PCA(n_components=3).fit_transform(emb_hd)
         else:
             emb_3d = np.zeros((emb_hd.shape[0], 3))
-        tree = KDTree(emb_3d)
     else:
-        token_ids, tokens, emb_hd, emb_3d, tree = get_filtered_embeddings_3d(
+        token_ids, tokens, emb_hd, emb_3d = get_filtered_3d(
             model_key, filter_type, custom_regex, sample_size, projection
         )
 
-    if len(token_ids) < max(n_pattern_points, 5):
+    n_tokens = len(token_ids)
+    if n_tokens < max(n_pattern_points, 5):
         yield {"status": "error",
-               "message": f"Only {len(token_ids)} tokens match filter '{filter_type}'. Need ≥ {n_pattern_points}."}
+               "message": f"Only {n_tokens} tokens match. Need ≥ {n_pattern_points}."}
         return
 
     yield {"status": "progress", "phase": "loading",
-           "message": f"Loaded {len(token_ids)} tokens. Generating pattern..."}
+           "message": f"Loaded {n_tokens} tokens."}
 
     # ── 2. Generate pattern ───────────────────────────
     gen = PATTERN_GENERATORS.get(pattern_name)
     if gen is None:
         yield {"status": "error", "message": f"Unknown pattern: {pattern_name}"}
         return
-    pattern = gen(n_points=n_pattern_points)
-    pat_n, _, _ = normalize(pattern)
 
-    # ── 3. Prepare context cloud (subsample for background) ──
+    # Coarse pattern for ICP, dense pattern for distance computation
+    pat_coarse = gen(n_points=n_pattern_points)
+    pat_dense = gen(n_points=n_pattern_points * 5)  # Smooth curve for distance
+
+    # Normalize everything
+    pat_coarse_n, pc_m, pc_s = normalize(pat_coarse)
+    pat_dense_n = (pat_dense - pc_m) / pc_s  # Same transform as coarse
+    tn, t_mean, t_scale = normalize(emb_3d)
+    tree_n = KDTree(tn)
+
+    # ── 3. Context cloud for background ───────────────
     rng = np.random.RandomState(42)
-    ctx_n = min(3000, len(token_ids))
-    ctx_idx = rng.choice(len(token_ids), size=ctx_n, replace=False)
+    ctx_n = min(3000, n_tokens)
+    ctx_idx = rng.choice(n_tokens, size=ctx_n, replace=False)
     context = {
         "positions_3d": emb_3d[ctx_idx].tolist(),
         "tokens": [tokens[i] for i in ctx_idx],
@@ -348,30 +540,26 @@ def progressive_search(
     }
 
     yield {"status": "progress", "phase": "searching",
-           "message": "Starting search...", "context": context,
-           "pattern_raw_3d": pat_n.tolist()}
+           "message": "Starting search...", "context": context}
 
-    # ── 4. Normalize target ───────────────────────────
-    tn, t_mean, t_scale = normalize(emb_3d)
-    tree_n = KDTree(tn)
+    # ── Helper: build result dict ─────────────────────
+    def build_result(inlier_idx, aligned_dense_n, all_dists, all_params,
+                     all_projs, threshold, strategy, is_final=False):
+        # Un-normalize curve and projections
+        curve_real = aligned_dense_n * t_scale + t_mean
 
-    best_error = float("inf")
-    best_indices = None
-    best_transformed = None
-    best_strategy = ""
+        # Order and prune inliers
+        ordered_idx, ordered_params, ordered_dists = \
+            order_and_prune_inliers(inlier_idx, all_params, all_dists)
 
-    def _build_result(indices, strategy, error, is_final=False):
-        """Build the response dict for a match."""
-        valid = [int(v) for v in indices if 0 <= v < len(token_ids)]
+        valid = [int(v) for v in ordered_idx]
         matched_pts = emb_3d[valid] if valid else np.zeros((0, 3))
 
-        # Align pattern overlay to matched positions
-        if len(valid) >= 2:
-            mm = matched_pts.mean(axis=0)
-            ms = np.std(matched_pts) + 1e-9
-            overlay = pat_n[:len(valid)] * ms + mm
+        # Projection points (nearest point on curve per inlier)
+        if len(valid) > 0:
+            proj_pts = (all_projs[valid] * t_scale + t_mean).tolist()
         else:
-            overlay = pat_n
+            proj_pts = []
 
         return {
             "status": "best_update" if not is_final else "done",
@@ -379,156 +567,173 @@ def progressive_search(
             "matched_tokens": [tokens[i] for i in valid],
             "matched_positions_3d": matched_pts.tolist(),
             "n_matched": len(valid),
-            "pattern_overlay_3d": overlay.tolist(),
-            "match_error": float(error),
-            "match_similarity": float(1.0 / (1.0 + error)),
+            "aligned_curve_3d": curve_real.tolist(),
+            "projection_points_3d": proj_pts,
+            "inlier_distances": ordered_dists.tolist(),
+            "curve_parameters": ordered_params.tolist(),
+            "inlier_threshold": float(threshold),
+            "match_error": float(np.mean(ordered_dists)) if len(ordered_dists) > 0 else 999,
+            "match_similarity": float(1.0 / (1.0 + np.mean(ordered_dists))) if len(ordered_dists) > 0 else 0,
             "search_info": {"strategy": strategy},
             "elapsed": round(time.time() - t0, 2),
             "context": context,
-            "pattern_raw_3d": pat_n.tolist(),
-            "n_searched": len(token_ids),
+            "n_searched": n_tokens,
             "filter_type": filter_type,
             "pattern_name": pattern_name,
+            "strictness": strictness,
         }
 
-    # ── 5. COARSE PASS — fast random ICP starts ──────
-    # Phase 1: many quick ICP trials with few iterations
-    n_coarse = 80
+    # ── 4. COARSE ICP SCAN ────────────────────────────
+    n_coarse = 100
+    best_score = -1
+    best_aligned_dense = None
+    best_inliers = np.array([], dtype=int)
+    best_dists = np.zeros(n_tokens)
+    best_params = np.zeros(n_tokens)
+    best_projs = np.zeros((n_tokens, 3))
+    best_thresh = 0
+    best_strategy = ""
     coarse_results = []
 
-    yield {"status": "progress", "phase": "coarse",
-           "message": f"Coarse scan: 0/{n_coarse}", "trial": 0, "total": n_coarse}
+    last_yield_time = time.time()
 
     for trial in range(n_coarse):
         r = np.random.RandomState(trial)
-        # Random rotation via Gram-Schmidt
-        M = r.randn(3, 3)
-        Q, _ = np.linalg.qr(M)
+        # Random rotation via QR
+        Q, _ = np.linalg.qr(r.randn(3, 3))
         scale = r.uniform(0.3, 2.5)
         offset = r.uniform(tn.min(axis=0) - 0.5, tn.max(axis=0) + 0.5)
-        init = scale * (pat_n @ Q.T) + offset
+        init = scale * (pat_coarse_n @ Q.T) + offset
 
-        raw_idx, transformed, error = fast_icp(init, tn, tree_n, max_iter=12)
-        coarse_results.append((trial, error, raw_idx, transformed))
+        aligned_coarse, icp_err = fast_icp(init, tn, tree_n, max_iter=12)
 
-        if error < best_error:
-            best_error = error
-            try:
-                best_indices = assign_unique(transformed, tn, raw_idx, tree_n)
-            except Exception:
-                best_indices = raw_idx
-            best_strategy = f"ICP coarse trial {trial}"
-            # Yield live update!
-            yield _build_result(best_indices, best_strategy, best_error)
+        # Derive transform, apply to dense curve
+        R, sc, src_c, tgt_c = derive_transform(pat_coarse_n, aligned_coarse)
+        aligned_dense = apply_transform(pat_dense_n, R, sc, src_c, tgt_c)
 
-        # Yield progress every 10 trials
+        # Score by inlier count on continuous curve
+        if is_curve:
+            score, inliers, dists, params, projs, thresh = \
+                score_curve_alignment(aligned_dense, tn, n_pattern_points, strictness)
+        else:
+            score, inliers, dists, params, projs, thresh = \
+                score_pointcloud_alignment(aligned_dense, tn, n_pattern_points, strictness)
+
+        coarse_results.append((trial, score, aligned_coarse, aligned_dense,
+                                inliers, dists, params, projs, thresh))
+
+        if score > best_score:
+            best_score = score
+            best_aligned_dense = aligned_dense
+            best_inliers = inliers
+            best_dists = dists
+            best_params = params
+            best_projs = projs
+            best_thresh = thresh
+            best_strategy = f"ICP coarse #{trial}"
+
+            # Live update (throttled)
+            now = time.time()
+            if now - last_yield_time > 0.3 and len(best_inliers) >= 3:
+                last_yield_time = now
+                yield build_result(best_inliers, best_aligned_dense,
+                                    best_dists, best_params, best_projs,
+                                    best_thresh, best_strategy)
+
         if (trial + 1) % 10 == 0:
             yield {"status": "progress", "phase": "coarse",
-                   "message": f"Coarse scan: {trial+1}/{n_coarse} (best error: {best_error:.4f})",
-                   "trial": trial + 1, "total": n_coarse,
-                   "best_error": best_error}
+                   "message": f"Coarse: {trial+1}/{n_coarse} | "
+                              f"best: {len(best_inliers)} inliers (score {best_score:.1f})",
+                   "trial": trial + 1, "total": n_coarse}
 
-    # ── 6. FINE PASS — refine top-K coarse results ───
-    coarse_results.sort(key=lambda x: x[1])
-    top_k = min(15, len(coarse_results))
+    # ── 5. REFINE TOP CANDIDATES ──────────────────────
+    coarse_results.sort(key=lambda x: x[1], reverse=True)
+    top_k = min(12, len(coarse_results))
 
     yield {"status": "progress", "phase": "fine",
            "message": f"Refining top {top_k} candidates...",
            "trial": 0, "total": top_k}
 
-    for rank, (trial, _, raw_idx, transformed) in enumerate(coarse_results[:top_k]):
-        # Re-run ICP with more iterations starting from the coarse result
-        raw_idx2, transformed2, error2 = fast_icp(transformed, tn, tree_n, max_iter=50)
+    for rank in range(top_k):
+        trial, _, aligned_coarse, aligned_dense, _, _, _, _, _ = coarse_results[rank]
 
-        if error2 < best_error:
-            best_error = error2
-            try:
-                best_indices = assign_unique(transformed2, tn, raw_idx2, tree_n)
-            except Exception:
-                best_indices = raw_idx2
-            best_strategy = f"ICP refined (coarse trial {trial})"
-            yield _build_result(best_indices, best_strategy, best_error)
+        # Re-run ICP with more iterations
+        R, sc, src_c, tgt_c = derive_transform(pat_coarse_n, aligned_coarse)
+        reinit = apply_transform(pat_coarse_n, R, sc, src_c, tgt_c)
+        refined_coarse, _ = fast_icp(reinit, tn, tree_n, max_iter=50)
+
+        R2, sc2, src_c2, tgt_c2 = derive_transform(pat_coarse_n, refined_coarse)
+        refined_dense = apply_transform(pat_dense_n, R2, sc2, src_c2, tgt_c2)
+
+        if is_curve:
+            score, inliers, dists, params, projs, thresh = \
+                score_curve_alignment(refined_dense, tn, n_pattern_points, strictness)
+        else:
+            score, inliers, dists, params, projs, thresh = \
+                score_pointcloud_alignment(refined_dense, tn, n_pattern_points, strictness)
+
+        if score > best_score:
+            best_score = score
+            best_aligned_dense = refined_dense
+            best_inliers = inliers
+            best_dists = dists
+            best_params = params
+            best_projs = projs
+            best_thresh = thresh
+            best_strategy = f"Refined coarse #{trial}"
+
+            yield build_result(best_inliers, best_aligned_dense,
+                                best_dists, best_params, best_projs,
+                                best_thresh, best_strategy)
 
         yield {"status": "progress", "phase": "fine",
-               "message": f"Refining: {rank+1}/{top_k} (best error: {best_error:.4f})",
-               "trial": rank + 1, "total": top_k, "best_error": best_error}
+               "message": f"Refining: {rank+1}/{top_k} | "
+                          f"best: {len(best_inliers)} inliers",
+               "trial": rank + 1, "total": top_k}
 
-    # ── 7. GREEDY CURVE FOLLOWING ─────────────────────
-    yield {"status": "progress", "phase": "greedy",
-           "message": "Greedy curve search...", "trial": 0, "total": 1}
+    # ── 6. ITERATIVE INLIER REFINEMENT ────────────────
+    # The key quality step: re-align curve to just the inliers,
+    # then recompute inliers against all tokens. Repeat.
+    yield {"status": "progress", "phase": "refine",
+           "message": "Iterative inlier refinement..."}
 
-    pat_dirs = np.diff(pat_n, axis=0)
-    pat_dirs /= (np.linalg.norm(pat_dirs, axis=1, keepdims=True) + 1e-9)
-    step_lens = np.linalg.norm(np.diff(pat_n, axis=0), axis=1)
-    typical_step = float(np.median(step_lens)) if len(step_lens) > 0 else 0.1
+    for rnd in range(5):
+        if len(best_inliers) < 3:
+            break
 
-    n_seeds = min(400, len(token_ids))
-    seeds = rng.choice(len(token_ids), size=n_seeds, replace=False)
-    greedy_best_chain = []
-    greedy_best_score = -1.0
+        result = refine_alignment(
+            pat_coarse_n, pat_dense_n, tn, best_inliers, tree_n,
+            n_pattern_points, strictness, is_curve, max_iter=40
+        )
+        if result[0] is None:
+            break
 
-    for si, seed in enumerate(seeds):
-        chain = [int(seed)]
-        used = {int(seed)}
+        new_dense, new_score, new_inliers, new_dists, new_params, new_projs, new_thresh = result
 
-        for step in range(min(n_pattern_points - 1, 80)):
-            cur = tn[chain[-1]]
-            tdir = pat_dirs[min(step, len(pat_dirs) - 1)]
+        if new_score > best_score:
+            best_score = new_score
+            best_aligned_dense = new_dense
+            best_inliers = new_inliers
+            best_dists = new_dists
+            best_params = new_params
+            best_projs = new_projs
+            best_thresh = new_thresh
+            best_strategy = f"Inlier refinement round {rnd + 1}"
 
-            # Fast: query nearby in KDTree
-            nearby = tree_n.query_ball_point(cur, typical_step * 4.0)
-            if not nearby:
-                dd, nn = tree_n.query(cur, k=min(50, tn.shape[0]))
-                nearby = nn.tolist() if hasattr(nn, 'tolist') else [nn]
+            yield build_result(best_inliers, best_aligned_dense,
+                                best_dists, best_params, best_projs,
+                                best_thresh, best_strategy)
+        else:
+            break  # No improvement, stop
 
-            best_next = None
-            best_s = -999.0
+        yield {"status": "progress", "phase": "refine",
+               "message": f"Refinement round {rnd+1}/5 | "
+                          f"{len(best_inliers)} inliers | score {best_score:.1f}"}
 
-            for idx in nearby:
-                if idx in used:
-                    continue
-                d = tn[idx] - cur
-                dist = np.linalg.norm(d)
-                if dist < 1e-9:
-                    continue
-                alignment = float(np.dot(d / dist, tdir))
-                step_match = 1.0 / (1.0 + abs(dist - typical_step) / (typical_step + 1e-9))
-                s = 0.6 * alignment + 0.4 * step_match
-                if s > best_s:
-                    best_s = s
-                    best_next = int(idx)
-
-            if best_next is None:
-                break
-            chain.append(best_next)
-            used.add(best_next)
-
-        if len(chain) >= 5:
-            chain_pts = tn[chain]
-            sub_pat = pat_n[:len(chain)]
-            sc = similarity(chain_pts, sub_pat)
-            if sc > greedy_best_score:
-                greedy_best_score = sc
-                greedy_best_chain = chain
-
-        # Yield progress every 50 seeds
-        if (si + 1) % 50 == 0:
-            yield {"status": "progress", "phase": "greedy",
-                   "message": f"Greedy: {si+1}/{n_seeds} seeds (best len: {len(greedy_best_chain)}, score: {greedy_best_score:.4f})",
-                   "trial": si + 1, "total": n_seeds}
-
-    # Check if greedy beat ICP
-    greedy_error = 1.0 - greedy_best_score if greedy_best_chain else float("inf")
-    if greedy_error < best_error and greedy_best_chain:
-        best_error = greedy_error
-        best_indices = np.array(greedy_best_chain)
-        best_strategy = f"Greedy curve (len={len(greedy_best_chain)})"
-        yield _build_result(best_indices, best_strategy, best_error)
-
-    # ── 8. OPTIONAL: Subspace search ─────────────────
+    # ── 7. OPTIONAL: SUBSPACE SEARCH ─────────────────
     if search_subspaces and emb_hd.shape[1] > 3:
         yield {"status": "progress", "phase": "subspace",
-               "message": "Searching alternate 3D subspaces..."}
+               "message": "Trying alternate 3D subspaces..."}
 
         max_comp = min(15, emb_hd.shape[1], emb_hd.shape[0])
         pca_full = PCA(n_components=max_comp)
@@ -536,46 +741,71 @@ def progressive_search(
 
         for start in range(0, min(10, max_comp - 2)):
             sub_3d = all_pcs[:, start:start + 3]
-            sub_n, _, _ = normalize(sub_3d)
+            sub_n, sub_m, sub_s = normalize(sub_3d)
             sub_tree = KDTree(sub_n)
 
-            for trial in range(10):
-                r = np.random.RandomState(1000 + start * 100 + trial)
-                M = r.randn(3, 3)
-                Q, _ = np.linalg.qr(M)
-                scale = r.uniform(0.5, 2.0)
-                offset = r.uniform(sub_n.min(axis=0) - 0.5, sub_n.max(axis=0) + 0.5)
-                init = scale * (pat_n @ Q.T) + offset
-                raw_idx, transformed, error = fast_icp(init, sub_n, sub_tree, max_iter=30)
+            for trial in range(8):
+                r = np.random.RandomState(2000 + start * 100 + trial)
+                Q, _ = np.linalg.qr(r.randn(3, 3))
+                sc = r.uniform(0.5, 2.0)
+                off = r.uniform(sub_n.min(0) - 0.5, sub_n.max(0) + 0.5)
+                init = sc * (pat_coarse_n @ Q.T) + off
 
-                if error < best_error:
-                    best_error = error
-                    try:
-                        best_indices = assign_unique(transformed, sub_n, raw_idx, sub_tree)
-                    except Exception:
-                        best_indices = raw_idx
+                aligned_c, _ = fast_icp(init, sub_n, sub_tree, 20)
+                R, s, sc2, tc2 = derive_transform(pat_coarse_n, aligned_c)
+                aligned_d = apply_transform(pat_dense_n, R, s, sc2, tc2)
 
-                    # Reproject matched tokens to main 3D for visualization
-                    best_strategy = f"Subspace PCA[{start+1}:{start+4}]"
-                    yield _build_result(best_indices, best_strategy, best_error)
+                if is_curve:
+                    score, inliers, dists, params, projs, thresh = \
+                        score_curve_alignment(aligned_d, sub_n, n_pattern_points, strictness)
+                else:
+                    score, inliers, dists, params, projs, thresh = \
+                        score_pointcloud_alignment(aligned_d, sub_n, n_pattern_points, strictness)
+
+                if score > best_score:
+                    best_score = score
+                    # Project back to original 3D for visualization
+                    best_aligned_dense = aligned_d * sub_s + sub_m
+                    # Also re-project the embedding space
+                    tn_disp = sub_n  # display coords
+                    t_mean_disp = sub_m
+                    t_scale_disp = sub_s
+                    best_inliers = inliers
+                    best_dists = dists
+                    best_params = params
+                    best_projs = projs
+                    best_thresh = thresh
+                    best_strategy = f"Subspace PCA[{start+1}:{start+4}] trial {trial}"
+
+                    # Rebuild context in this subspace
+                    context["positions_3d"] = sub_3d[ctx_idx].tolist()
+                    emb_3d = sub_3d
+                    tn = sub_n
+                    t_mean = sub_m
+                    t_scale = sub_s
+
+                    yield build_result(best_inliers, best_aligned_dense,
+                                        best_dists, best_params, best_projs,
+                                        best_thresh, best_strategy)
 
             yield {"status": "progress", "phase": "subspace",
-                   "message": f"Subspace PCA[{start+1}:{start+4}] done (best: {best_error:.4f})"}
+                   "message": f"Subspace PCA[{start+1}:{start+4}] done"}
 
-    # ── 9. DONE ──────────────────────────────────────
-    if best_indices is not None:
-        yield _build_result(best_indices, best_strategy, best_error, is_final=True)
+    # ── 8. DONE ──────────────────────────────────────
+    if len(best_inliers) >= 3:
+        yield build_result(best_inliers, best_aligned_dense,
+                            best_dists, best_params, best_projs,
+                            best_thresh, best_strategy, is_final=True)
     else:
-        yield {"status": "done", "match_similarity": 0,
-               "message": "No match found.", "n_matched": 0}
+        yield {"status": "done", "match_similarity": 0, "n_matched": 0,
+               "message": "No good match found. Try adjusting strictness or filter."}
 
 
 # ═══════════════════════════════════════════════════════════════════
-# NON-GENERATOR WRAPPERS (for scan_all and simple calls)
+# SYNC WRAPPERS
 # ═══════════════════════════════════════════════════════════════════
 
 def find_pattern_sync(model_key, pattern_name, **kwargs) -> Dict:
-    """Run progressive_search but return only the final result."""
     last = {"status": "error", "message": "No result"}
     for update in progressive_search(model_key, pattern_name, **kwargs):
         if update.get("status") in ("best_update", "done"):
@@ -583,10 +813,9 @@ def find_pattern_sync(model_key, pattern_name, **kwargs) -> Dict:
     return last
 
 
-def scan_all_patterns(model_key: str, filter_type: str = "all",
-                       sample_size: int = 5000, n_pattern_points: int = 30,
-                       projection: str = "pca") -> List[Dict]:
-    """Quick scan: which pattern shape best fits this token set?"""
+def scan_all_patterns(model_key, filter_type="all", sample_size=5000,
+                       n_pattern_points=30, projection="pca",
+                       strictness=0.5) -> List[Dict]:
     results = []
     for name in PATTERN_GENERATORS:
         try:
@@ -596,18 +825,17 @@ def scan_all_patterns(model_key: str, filter_type: str = "all",
                 filter_type=filter_type,
                 sample_size=sample_size,
                 projection=projection,
+                strictness=strictness,
             )
             if out.get("status") != "error":
                 results.append({
-                    "pattern": name,
-                    "similarity": out.get("match_similarity", 0),
+                    "pattern": name, "similarity": out.get("match_similarity", 0),
                     "error": out.get("match_error", 999),
                     "n_matched": out.get("n_matched", 0),
                     "sample_tokens": out.get("matched_tokens", [])[:10],
                 })
         except Exception as e:
             results.append({"pattern": name, "similarity": 0, "error": str(e)})
-
     results.sort(key=lambda x: x.get("similarity", 0), reverse=True)
     return results
 

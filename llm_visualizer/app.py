@@ -518,10 +518,6 @@ def api_pattern_search():
 
 @app.route("/api/patterns/search_stream", methods=["POST"])
 def api_pattern_search_stream():
-    """
-    SSE endpoint: streams progressive search results in real time.
-    Each event is a JSON message the frontend can render immediately.
-    """
     data = request.json
     model_key = data.get("model", "gpt2")
     pattern_name = data.get("pattern", "helix")
@@ -531,8 +527,8 @@ def api_pattern_search_stream():
     sample_size = data.get("sample_size", 10000)
     projection = data.get("projection", "pca")
     search_subspaces = data.get("search_subspaces", False)
+    strictness = float(data.get("strictness", 0.5))
 
-    # Optional layer-based search
     trace_key = data.get("trace_key", None)
     layer_idx = data.get("layer", None)
     layer_hs = None
@@ -547,28 +543,20 @@ def api_pattern_search_stream():
 
     def generate():
         for update in progressive_search(
-            model_key=model_key,
-            pattern_name=pattern_name,
-            n_pattern_points=n_points,
-            filter_type=filter_type,
-            custom_regex=custom_regex,
-            sample_size=sample_size,
-            projection=projection,
-            search_subspaces=search_subspaces,
-            layer_hidden_states=layer_hs,
-            layer_tokens=layer_toks,
+            model_key=model_key, pattern_name=pattern_name,
+            n_pattern_points=n_points, filter_type=filter_type,
+            custom_regex=custom_regex, sample_size=sample_size,
+            projection=projection, search_subspaces=search_subspaces,
+            strictness=strictness,
+            layer_hidden_states=layer_hs, layer_tokens=layer_toks,
         ):
             yield f"data: {json.dumps(update)}\n\n"
 
     return Response(
         stream_with_context(generate()),
         mimetype="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",  # Disable nginx buffering
-        },
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
-
 
 
 # ─── Run ──────────────────────────────────────────────────────────
